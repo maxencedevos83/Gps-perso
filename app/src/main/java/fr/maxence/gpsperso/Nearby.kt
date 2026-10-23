@@ -17,19 +17,25 @@ data class NearbyPlace(
     val brand: String? = null,
     /** Prix du carburant préféré (station), pour trier. */
     val price: Double? = null,
+    /** Tous les prix connus (clé de carburant → €/L). */
+    val prices: Map<String, Double> = emptyMap(),
+    val address: String? = null,
+    /** Date de mise à jour des prix (ISO 8601). */
+    val updated: String? = null,
+    /** Ville (stations) pour le titre. */
+    val city: String? = null,
 ) {
     fun toPlace() = Place(name, detail ?: "", lat, lon)
 }
 
 object Nearby {
-    private const val OVERPASS = "https://overpass-api.de/api/interpreter"
     private const val FUEL_API =
         "https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records"
 
     val fuels = listOf("gazole" to "Gazole", "sp95" to "SP95", "e10" to "SP95-E10", "sp98" to "SP98", "e85" to "E85", "gplc" to "GPLc")
 
     private fun overpass(query: String): List<JSONObject> {
-        val json = JSONObject(Net.request(OVERPASS, "data=${Net.enc(query)}", "application/x-www-form-urlencoded"))
+        val json = Net.overpass(query)
         val elements = json.getJSONArray("elements")
         return (0 until elements.length()).map { elements.getJSONObject(it) }
     }
@@ -110,10 +116,13 @@ object Nearby {
         for (i in 0 until results.length()) {
             val r = results.getJSONObject(i)
             val geom = r.optJSONObject("geom")
-            val la = geom?.optDouble("lat") ?: r.optString("latitude").toDoubleOrNull()?.div(100_000) ?: continue
-            val lo = geom?.optDouble("lon") ?: r.optString("longitude").toDoubleOrNull()?.div(100_000) ?: continue
+            val la = geom?.optDouble("lat")?.takeIf { !it.isNaN() } ?: r.optString("latitude").toDoubleOrNull()?.div(100_000) ?: continue
+            val lo = geom?.optDouble("lon")?.takeIf { !it.isNaN() } ?: r.optString("longitude").toDoubleOrNull()?.div(100_000) ?: continue
             if (la.isNaN() || lo.isNaN()) continue
-            val price = r.optDouble("${fuel}_prix").takeIf { !it.isNaN() && it > 0 }
+            val prices = LinkedHashMap<String, Double>()
+            for ((k, _) in fuels) r.optDouble("${k}_prix").takeIf { !it.isNaN() && it > 0 }?.let { prices[k] = it }
+            val updated = fuels.mapNotNull { (k, _) -> r.optString("${k}_maj").takeIf { it.isNotBlank() && it != "null" } }.maxOrNull()
+            val price = prices[fuel]
             val others = fuels.filter { it.first != fuel }
                 .mapNotNull { (k, label) -> r.optDouble("${k}_prix").takeIf { !it.isNaN() && it > 0 }?.let { "$label ${fmtPrice(it)}" } }
             val address = listOf(r.optString("adresse"), r.optString("ville")).filter { it.isNotBlank() }.joinToString(", ")
@@ -126,6 +135,10 @@ object Nearby {
                     lat = la, lon = lo,
                     detail = listOf(main, address, others.joinToString(", ")).filter { it.isNotBlank() }.joinToString("\n"),
                     price = price,
+                    prices = prices,
+                    address = address.ifBlank { null },
+                    updated = updated,
+                    city = capitalize(r.optString("ville")).ifBlank { null },
                 )
             )
         }
@@ -144,7 +157,7 @@ object Nearby {
         }
     }
 
-    private fun fmtPrice(p: Double) = String.format(Locale.FRANCE, "%.3f €", p)
+    fun fmtPrice(p: Double) = String.format(Locale.FRANCE, "%.3f €", p)
 
     private fun capitalize(s: String) = s.lowercase(Locale.FRANCE).split(' ', '-').joinToString(" ") {
         it.replaceFirstChar { c -> c.titlecase(Locale.FRANCE) }

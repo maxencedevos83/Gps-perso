@@ -9,10 +9,6 @@ class Settings(context: Context) {
         get() = prefs.getString("tomtom_key", "") ?: ""
         set(v) = prefs.edit().putString("tomtom_key", v.trim()).apply()
 
-    var lufopKey: String
-        get() = prefs.getString("lufop_key", "") ?: ""
-        set(v) = prefs.edit().putString("lufop_key", v.trim()).apply()
-
     var trafficOn: Boolean
         get() = prefs.getBoolean("traffic_on", true)
         set(v) = prefs.edit().putBoolean("traffic_on", v).apply()
@@ -40,5 +36,4 @@ class Settings(context: Context) {
         set(v) = prefs.edit().putBoolean("show_brands", v).apply()
 
     val hasTomTom: Boolean get() = tomtomKey.isNotBlank()
-    val hasLufop: Boolean get() = lufopKey.isNotBlank()
 }

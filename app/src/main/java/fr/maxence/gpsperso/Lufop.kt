@@ -2,24 +2,27 @@ package fr.maxence.gpsperso
 
 import android.content.Context
 import org.json.JSONArray
-import org.json.JSONObject
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.zip.ZipInputStream
 
-class LufopSyncResult(val added: List<Alert>, val total: Int, val full: Boolean)
+class ImportResult(val imported: Int, val added: List<Alert>, val total: Int, val firstImport: Boolean)
 
 /**
- * Base radars Lufop (clé API personnelle) : téléchargée en entier une première fois,
- * puis mise à jour chaque jour avec seulement les nouveautés (paramètre since).
+ * Base radars / bornes importée depuis un fichier téléchargé sur lufop.net
+ * (ou tout fichier de POI au format CSV, GPX, KML, OV2, éventuellement dans un ZIP).
  */
-class LufopStore(private val context: Context) {
+class LufopStore(context: Context) {
     private val file = File(context.filesDir, "lufop.json")
     private val prefs = context.getSharedPreferences("lufop", Context.MODE_PRIVATE)
-    private var cache: List<Alert>? = null
+    @Volatile private var cache: List<Alert>? = null
 
-    val lastSync: String? get() = prefs.getString("last_sync", null)
+    val lastImport: String? get() = prefs.getString("last_import", null)
 
     fun all(): List<Alert> {
         cache?.let { return it }
@@ -32,117 +35,212 @@ class LufopStore(private val context: Context) {
         return list
     }
 
-    /** Radars ajoutés ou modifiés lors des dernières mises à jour. */
+    /** Éléments apparus lors du dernier import. */
     fun recent(): List<Alert> {
         val ids = prefs.getStringSet("recent_ids", emptySet()) ?: emptySet()
         return all().filter { it.id in ids }
     }
 
-    fun needsSync(): Boolean = lastSync != today()
-
-    fun sync(key: String, forceFull: Boolean = false): LufopSyncResult {
-        val existing = if (forceFull) emptyList() else all()
-        val full = existing.isEmpty()
-        var url = "https://api.lufop.net/api?key=${Net.enc(key)}&format=json&pays=fr&nbr=10000"
-        if (!full && lastSync != null) url += "&since=$lastSync"
-        val raw = Net.request(url)
-        val parsed = parse(raw)
-        if (parsed.isEmpty() && full) {
-            throw IllegalStateException("Réponse Lufop non reconnue : ${raw.take(300)}")
-        }
-        val byId = LinkedHashMap<String, Alert>()
-        existing.forEach { byId[it.id] = it }
-        val added = parsed.filter { byId[it.id] != it }
-        parsed.forEach { byId[it.id] = it }
-        val merged = byId.values.toList()
+    /**
+     * Remplace les éléments des mêmes types que ceux du fichier (un fichier radars ne supprime pas
+     * les bornes importées avant) et repère les nouveautés.
+     */
+    fun import(items: List<Alert>): ImportResult {
+        val existing = all()
+        val types = items.map { it.type }.toSet()
+        val previousOfTypes = existing.filter { it.type in types }
+        val previousIds = previousOfTypes.map { it.id }.toSet()
+        val added = if (previousOfTypes.isEmpty()) emptyList() else items.filter { it.id !in previousIds }
+        val merged = existing.filter { it.type !in types } + items
         val array = JSONArray()
         merged.forEach { array.put(it.toJson()) }
         file.writeText(array.toString())
         cache = merged
-        val editor = prefs.edit().putString("last_sync", today())
-        if (!full) editor.putStringSet("recent_ids", added.map { it.id }.toSet())
-        editor.apply()
-        return LufopSyncResult(if (full) emptyList() else added, merged.size, full)
+        prefs.edit()
+            .putString("last_import", SimpleDateFormat("dd/MM/yyyy", Locale.FRANCE).format(Date()))
+            .putStringSet("recent_ids", added.map { it.id }.toSet())
+            .apply()
+        return ImportResult(items.size, added, merged.size, previousOfTypes.isEmpty())
     }
 
-    private fun today() = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+    fun clear() {
+        file.delete()
+        cache = emptyList()
+        prefs.edit().clear().apply()
+    }
+}
 
-    companion object {
-        /**
-         * Lecture tolérante : on cherche le premier tableau d'objets contenant des coordonnées,
-         * quel que soit le nom exact des champs.
-         */
-        fun parse(raw: String): List<Alert> {
-            val root: Any = try {
-                if (raw.trimStart().startsWith("[")) JSONArray(raw) else JSONObject(raw)
-            } catch (e: Exception) {
-                return emptyList()
-            }
-            val array = findArray(root) ?: return emptyList()
-            val list = ArrayList<Alert>()
-            for (i in 0 until array.length()) {
-                val o = array.optJSONObject(i) ?: continue
-                val lat = number(o, "lat", "latitude") ?: continue
-                val lon = number(o, "lng", "lon", "long", "longitude") ?: continue
-                val id = text(o, "id", "ID", "idradar") ?: "${lat}_$lon"
-                val typeText = (text(o, "type", "categorie", "category", "nom") ?: "").lowercase()
-                val type = when {
-                    "feu" in typeText || "red" in typeText -> AlertType.RADAR_FEU
-                    "mobile" in typeText || "chantier" in typeText -> AlertType.RADAR_MOBILE
-                    else -> AlertType.RADAR_FIXE
-                }
-                val speed = text(o, "vitesse", "speed", "vit", "vma")?.filter { it.isDigit() }?.takeIf { it.isNotEmpty() }
-                val place = listOfNotNull(text(o, "voie", "street", "rue"), text(o, "commune", "city", "ville"))
-                    .joinToString(", ").ifBlank { null }
-                list.add(
-                    Alert(
-                        id = "lufop-$id",
-                        type = type,
-                        lat = lat,
-                        lon = lon,
-                        createdAt = 0,
-                        detail = speed,
-                        source = "lufop",
-                        description = listOfNotNull(typeText.ifBlank { null }, place).joinToString(" · ").ifBlank { null },
-                    )
-                )
-            }
-            return list
-        }
-
-        private fun findArray(node: Any?, depth: Int = 0): JSONArray? {
-            if (depth > 4) return null
-            when (node) {
-                is JSONArray -> {
-                    if (node.length() > 0 && node.optJSONObject(0)?.let { number(it, "lat", "latitude") != null } == true) return node
-                    for (i in 0 until node.length()) findArray(node.opt(i), depth + 1)?.let { return it }
-                    if (node.length() == 0) return node
-                }
-                is JSONObject -> {
-                    val keys = node.keys()
-                    while (keys.hasNext()) findArray(node.opt(keys.next()), depth + 1)?.let { return it }
+object RadarFile {
+    /** Lit un fichier (ou une archive ZIP) et renvoie les points trouvés. */
+    fun parse(fileName: String, bytes: ByteArray): List<Alert> {
+        val name = fileName.lowercase(Locale.ROOT)
+        if (name.endsWith(".zip") || (bytes.size > 4 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte())) {
+            val all = ArrayList<Alert>()
+            ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
+                while (true) {
+                    val entry = zip.nextEntry ?: break
+                    if (!entry.isDirectory) all += parse(entry.name, zip.readBytes())
                 }
             }
-            return null
+            return all.distinctBy { it.id }
         }
-
-        private fun findKey(o: JSONObject, names: Array<out String>): String? {
-            val keys = o.keys()
-            while (keys.hasNext()) {
-                val k = keys.next()
-                if (names.any { it.equals(k, ignoreCase = true) }) return k
+        return when {
+            name.endsWith(".ov2") -> parseOv2(fileName, bytes)
+            name.endsWith(".gpx") -> parseGpx(fileName, decode(bytes))
+            name.endsWith(".kml") -> parseKml(fileName, decode(bytes))
+            name.endsWith(".csv") || name.endsWith(".txt") || name.endsWith(".asc") -> parseCsv(fileName, decode(bytes))
+            else -> {
+                val text = decode(bytes)
+                when {
+                    "<gpx" in text -> parseGpx(fileName, text)
+                    "<kml" in text -> parseKml(fileName, text)
+                    else -> parseCsv(fileName, text)
+                }
             }
-            return null
         }
+    }
 
-        private fun number(o: JSONObject, vararg names: String): Double? {
-            val k = findKey(o, names) ?: return null
-            return o.opt(k)?.toString()?.replace(',', '.')?.toDoubleOrNull()
-        }
+    private fun decode(bytes: ByteArray): String {
+        val utf8 = String(bytes, Charsets.UTF_8)
+        return if ('�' in utf8) String(bytes, Charsets.ISO_8859_1) else utf8
+    }
 
-        private fun text(o: JSONObject, vararg names: String): String? {
-            val k = findKey(o, names) ?: return null
-            return o.opt(k)?.toString()?.trim()?.takeIf { it.isNotEmpty() && it != "null" }
+    /** Type d'alerte deviné d'après le nom du fichier et du point. */
+    private fun typeFor(fileName: String, label: String): AlertType {
+        val t = (fileName + " " + label).lowercase(Locale.FRANCE)
+        return when {
+            "borne" in t || "recharge" in t || "irve" in t || "electri" in t || "électri" in t -> AlertType.BORNE
+            "feu" in t || "red" in t -> AlertType.RADAR_FEU
+            "mobile" in t || "embarqu" in t -> AlertType.RADAR_MOBILE
+            "danger" in t || "accident" in t -> AlertType.DANGER
+            else -> AlertType.RADAR_FIXE
         }
+    }
+
+    private val speedRegex = Regex("(?<!\\d)(20|30|40|45|50|60|70|80|90|100|110|130)(?!\\d)")
+
+    private fun make(fileName: String, lat: Double, lon: Double, label: String, speed: String? = null): Alert? {
+        if (lat !in -90.0..90.0 || lon !in -180.0..180.0 || (lat == 0.0 && lon == 0.0)) return null
+        val type = typeFor(fileName.substringAfterLast('/'), label)
+        val detectedSpeed = speed ?: if (type == AlertType.BORNE) null else
+            speedRegex.find(label)?.value ?: speedRegex.find(fileName.substringAfterLast('/'))?.value
+        val id = String.format(Locale.US, "lufop-%.5f_%.5f", lat, lon)
+        return Alert(
+            id = id,
+            type = type,
+            lat = lat,
+            lon = lon,
+            createdAt = 0,
+            detail = detectedSpeed,
+            source = "lufop",
+            description = label.trim().ifBlank { null },
+        )
+    }
+
+    private fun parseGpx(fileName: String, text: String): List<Alert> {
+        val wpt = Regex("<wpt[^>]*?lat=\"([-0-9.]+)\"[^>]*?lon=\"([-0-9.]+)\"[^>]*>(.*?)</wpt>", RegexOption.DOT_MATCHES_ALL)
+        val wptLonFirst = Regex("<wpt[^>]*?lon=\"([-0-9.]+)\"[^>]*?lat=\"([-0-9.]+)\"[^>]*>(.*?)</wpt>", RegexOption.DOT_MATCHES_ALL)
+        val nameRe = Regex("<name>(.*?)</name>", RegexOption.DOT_MATCHES_ALL)
+        val out = ArrayList<Alert>()
+        wpt.findAll(text).forEach { m ->
+            val label = nameRe.find(m.groupValues[3])?.groupValues?.get(1)?.let(::unescape) ?: ""
+            make(fileName, m.groupValues[1].toDouble(), m.groupValues[2].toDouble(), label)?.let(out::add)
+        }
+        if (out.isEmpty()) wptLonFirst.findAll(text).forEach { m ->
+            val label = nameRe.find(m.groupValues[3])?.groupValues?.get(1)?.let(::unescape) ?: ""
+            make(fileName, m.groupValues[2].toDouble(), m.groupValues[1].toDouble(), label)?.let(out::add)
+        }
+        return out
+    }
+
+    private fun parseKml(fileName: String, text: String): List<Alert> {
+        val placemark = Regex("<Placemark.*?</Placemark>", RegexOption.DOT_MATCHES_ALL)
+        val nameRe = Regex("<name>(.*?)</name>", RegexOption.DOT_MATCHES_ALL)
+        val coordRe = Regex("<coordinates>\\s*([-0-9.]+)\\s*,\\s*([-0-9.]+)")
+        return placemark.findAll(text).mapNotNull { m ->
+            val c = coordRe.find(m.value) ?: return@mapNotNull null
+            val label = nameRe.find(m.value)?.groupValues?.get(1)?.let(::unescape) ?: ""
+            make(fileName, c.groupValues[2].toDouble(), c.groupValues[1].toDouble(), label)
+        }.toList()
+    }
+
+    private fun unescape(s: String) = s.replace("<![CDATA[", "").replace("]]>", "")
+        .replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").trim()
+
+    /**
+     * CSV / TXT / ASC : on repère les deux premiers nombres qui ressemblent à des coordonnées,
+     * dans l'ordre lon,lat (Garmin, iGO) ou lat,lon. Le reste sert de libellé.
+     */
+    private fun parseCsv(fileName: String, text: String): List<Alert> {
+        val out = ArrayList<Alert>()
+        for (raw in text.lineSequence()) {
+            val line = raw.trim()
+            if (line.isEmpty() || line.startsWith("#") || line.startsWith(";")) continue
+            val fields = splitCsv(line)
+            val numbers = fields.mapIndexedNotNull { i, f -> f.replace(',', '.').toDoubleOrNull()?.let { i to it } }
+            if (numbers.size < 2) continue
+            val (i1, a) = numbers[0]
+            val (i2, b) = numbers[1]
+            val (lat, lon) = when {
+                a in 41.0..52.0 && b in -6.0..10.0 -> a to b
+                b in 41.0..52.0 && a in -6.0..10.0 -> b to a
+                Math.abs(a) <= 180 && Math.abs(b) <= 90 -> b to a // format lon,lat par défaut
+                else -> continue
+            }
+            val label = fields.filterIndexed { i, f -> i != i1 && i != i2 && f.replace(',', '.').toDoubleOrNull() == null }
+                .joinToString(" ").trim()
+            // iGO : X,Y,TYPE,SPEED,... → la vitesse est un nombre plausible après les coordonnées
+            val speed = numbers.drop(2).map { it.second }.firstOrNull { it in 20.0..130.0 && it % 10 == 0.0 }?.toInt()?.toString()
+            make(fileName, lat, lon, label, speed)?.let(out::add)
+        }
+        return out
+    }
+
+    private fun splitCsv(line: String): List<String> {
+        val sep = when {
+            '\t' in line -> '\t'
+            line.count { it == ';' } > line.count { it == ',' } / 2 && ';' in line -> ';'
+            else -> ','
+        }
+        val fields = ArrayList<String>()
+        val current = StringBuilder()
+        var quoted = false
+        for (c in line) {
+            when {
+                c == '"' -> quoted = !quoted
+                c == sep && !quoted -> { fields.add(current.toString().trim()); current.clear() }
+                else -> current.append(c)
+            }
+        }
+        fields.add(current.toString().trim())
+        return fields
+    }
+
+    /** Format binaire TomTom OV2 : enregistrements de type 2 (lon, lat ×100 000, nom). */
+    private fun parseOv2(fileName: String, bytes: ByteArray): List<Alert> {
+        val out = ArrayList<Alert>()
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        while (buf.remaining() >= 5) {
+            val start = buf.position()
+            val type = buf.get().toInt() and 0xff
+            if (type == 1) {
+                // Enregistrement « skipper » de 21 octets : sa longueur couvre tout le bloc, on l'enjambe seul.
+                if (start + 21 > bytes.size) break
+                buf.position(start + 21)
+                continue
+            }
+            val length = buf.int
+            if (length < 5 || start + length > bytes.size) break
+            when (type) {
+                2, 3 -> if (length >= 13) {
+                    val lon = buf.int / 100_000.0
+                    val lat = buf.int / 100_000.0
+                    val nameBytes = bytes.copyOfRange(start + 13, start + length).takeWhile { it != 0.toByte() }.toByteArray()
+                    make(fileName, lat, lon, decode(nameBytes))?.let(out::add)
+                }
+            }
+            buf.position(start + length)
+        }
+        return out
     }
 }

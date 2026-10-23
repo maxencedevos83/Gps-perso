@@ -3,12 +3,12 @@ package fr.maxence.gpsperso
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.RectF
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
@@ -26,12 +26,11 @@ import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.ArrayAdapter
-import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.ScrollView
-import android.widget.Spinner
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import org.maplibre.android.MapLibre
@@ -70,6 +69,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         private const val STYLE_URL = "https://tiles.openfreemap.org/styles/liberty"
         private const val REQ_LOCATION = 1
         private const val REQ_CALENDAR = 2
+        private const val REQ_IMPORT = 3
         private const val OFF_ROUTE_METERS = 50.0
         private const val ALERT_AHEAD_METERS = 800.0
         private const val FREE_DRIVE_ALERT_METERS = 500.0
@@ -199,7 +199,6 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         tts = TextToSpeech(this, this)
         requestLocationPermission()
         io.execute { lufopStore.all() } // préchargement du cache
-        if (settings.hasLufop && lufopStore.needsSync()) syncLufop(manual = false)
         main.postDelayed(ticker, 60_000)
     }
 
@@ -425,7 +424,8 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     /** Toutes les alertes connues : radars (Lufop sinon OSM), bornes, incidents TomTom, signalements perso. */
     private fun allAlerts(): List<Alert> {
         val lufop = lufopStore.all()
-        val osm = osmAlerts.filter { it.type == AlertType.BORNE || lufop.isEmpty() }
+        val hasImportedRadars = lufop.any { it.type != AlertType.BORNE }
+        val osm = osmAlerts.filter { it.type == AlertType.BORNE || !hasImportedRadars }
         return (lufop + osm + incidents.values + alertStore.all())
             .filter { it.type != AlertType.BORNE || settings.showChargers }
     }
@@ -461,16 +461,88 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     }
 
     /** Appui sur un POI ou une alerte de la carte : on affiche sa fiche. */
+    /** Appui sur la carte : fiche du lieu touché (nos points ou les lieux de la carte elle-même). */
     private fun handleMapTap(latLng: LatLng): Boolean {
         val m = map ?: return false
         val point = m.projection.toScreenLocation(latLng)
-        val hit = m.queryRenderedFeatures(point, "pois-layer", "brands-layer", "nearby-layer", "alerts-layer").firstOrNull() ?: return false
-        val id = if (hit.hasProperty("id")) hit.getStringProperty("id") else return false
-        (brandPlaces[id] ?: nearbyShown.firstOrNull { it.id == id })?.let { showNearbyActions(it); return true }
-        poiStore.all().firstOrNull { it.id == id }?.let { showPoiActions(it); return true }
-        allAlerts().firstOrNull { it.id == id }?.let { showAlertDetails(it); return true }
-        return false
+        val r = dp(14).toFloat()
+        val rect = RectF(point.x - r, point.y - r, point.x + r, point.y + r)
+        val hit = m.queryRenderedFeatures(rect, "pois-layer", "brands-layer", "nearby-layer", "alerts-layer").firstOrNull()
+        if (hit != null && hit.hasProperty("id")) {
+            val id = hit.getStringProperty("id")
+            (brandPlaces[id] ?: nearbyShown.firstOrNull { it.id == id })?.let { showPlaceCard(it); return true }
+            poiStore.all().firstOrNull { it.id == id }?.let { showPoiActions(it); return true }
+            allAlerts().firstOrNull { it.id == id }?.let { showAlertDetails(it); return true }
+        }
+        // Lieux dessinés par le fond de carte OpenStreetMap (stations, restos, commerces...)
+        val base = m.queryRenderedFeatures(rect).firstOrNull {
+            it.hasProperty("class") && it.hasProperty("name") && it.geometry() is Point
+        } ?: return false
+        val p = base.geometry() as Point
+        val cls = base.getStringProperty("class") ?: ""
+        val name = base.getStringProperty("name") ?: return false
+        val brand = when {
+            name.contains("mcdonald", ignoreCase = true) -> "mcdo"
+            name.contains("burger king", ignoreCase = true) -> "bk"
+            else -> null
+        }
+        val kind = when (cls) {
+            "fuel" -> NearbyKind.STATION
+            else -> if (brand != null) NearbyKind.FAST_FOOD_BRAND else NearbyKind.RESTAURANT
+        }
+        val subclass = if (base.hasProperty("subclass")) base.getStringProperty("subclass") else null
+        val place = NearbyPlace(
+            id = "base-${p.latitude()}-${p.longitude()}",
+            kind = kind,
+            name = name,
+            lat = p.latitude(),
+            lon = p.longitude(),
+            detail = placeTypeLabel(subclass ?: cls),
+            brand = brand,
+        )
+        if (kind == NearbyKind.STATION) showStationCard(place) else showPlaceCard(place)
+        return true
     }
+
+    private fun placeTypeLabel(cls: String): String = when (cls) {
+        "fuel" -> "Station-service"
+        "fast_food" -> "Fast-food"
+        "restaurant" -> "Restaurant"
+        "cafe" -> "Café"
+        "bar", "pub" -> "Bar"
+        "bakery" -> "Boulangerie"
+        "supermarket", "grocery", "convenience" -> "Supermarché"
+        "parking" -> "Parking"
+        "pharmacy" -> "Pharmacie"
+        "hospital" -> "Hôpital"
+        "lodging", "hotel" -> "Hôtel"
+        "charging_station" -> "Borne de recharge"
+        "shop" -> "Commerce"
+        else -> cls.replace('_', ' ').replaceFirstChar { it.titlecase(Locale.FRANCE) }
+    }
+
+    private fun alertIcon(t: AlertType) = when (t) {
+        AlertType.RADAR_FIXE -> "📷"
+        AlertType.RADAR_FEU -> "🚦"
+        AlertType.RADAR_MOBILE -> "📸"
+        AlertType.POLICE -> "👮"
+        AlertType.ACCIDENT -> "💥"
+        AlertType.DANGER -> "⚠️"
+        AlertType.TRAVAUX -> "🚧"
+        AlertType.ROUTE_FERMEE -> "⛔"
+        AlertType.BOUCHON -> "🚗"
+        AlertType.BORNE -> "🔌"
+    }
+
+    /** Couleur pâle (pastille d'icône) dérivée d'une couleur vive. */
+    private fun pale(hex: String): String {
+        val c = Color.parseColor(hex)
+        fun mix(v: Int) = (v + (255 - v) * 0.82).toInt()
+        return String.format("#%02X%02X%02X", mix(Color.red(c)), mix(Color.green(c)), mix(Color.blue(c)))
+    }
+
+    private fun distanceLabel(lat: Double, lon: Double): String? =
+        lastLocation?.let { "à " + Geo.formatDistance(Geo.distance(it.latitude, it.longitude, lat, lon)) }
 
     private fun showAlertDetails(a: Alert) {
         val source = when (a.source) {
@@ -479,21 +551,15 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             "tomtom" -> "Trafic TomTom"
             else -> "Mon signalement"
         }
-        val builder = AlertDialog.Builder(this)
-            .setTitle(a.title)
-            .setMessage(listOfNotNull(a.description, "Source : $source").joinToString("\n\n"))
-            .setPositiveButton("Fermer", null)
-        if (a.source == "moi") {
-            builder.setNegativeButton("Supprimer") { _, _ ->
-                alertStore.remove(a.id)
-                refreshAlertLayer()
-                computeRouteAlerts()
-            }
+        val sheet = Sheet(this).title("${alertIcon(a.type)}  ${a.title}", listOfNotNull(source, distanceLabel(a.lat, a.lon)).joinToString(" · "))
+        a.description?.let { sheet.text(it) }
+        if (!navigating) sheet.primary("▲  Y aller") { setDestination(Place(a.title, a.description ?: "", a.lat, a.lon)) }
+        if (a.source == "moi") sheet.secondary("Supprimer ce signalement") {
+            alertStore.remove(a.id)
+            refreshAlertLayer()
+            computeRouteAlerts()
         }
-        if (!navigating) {
-            builder.setNeutralButton("Y aller") { _, _ -> setDestination(Place(a.title, a.description ?: "", a.lat, a.lon)) }
-        }
-        builder.show()
+        sheet.show()
     }
 
     // ---------- Trafic TomTom ----------
@@ -504,11 +570,10 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
 
     private fun toggleTraffic() {
         if (!settings.hasTomTom) {
-            AlertDialog.Builder(this)
-                .setTitle("Trafic en temps réel")
-                .setMessage("Ajoutez votre clé TomTom gratuite dans les Réglages pour afficher le trafic et les incidents.")
-                .setPositiveButton("Réglages") { _, _ -> showSettings() }
-                .setNegativeButton("Plus tard", null)
+            Sheet(this)
+                .title("🚦  Trafic en temps réel")
+                .text("Ajoutez votre clé TomTom gratuite dans les Réglages pour afficher le trafic, les bouchons et les incidents.")
+                .primary("Ouvrir les Réglages") { showSettings() }
                 .show()
             return
         }
@@ -900,7 +965,11 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
 
     private fun openInWaze() {
         val d = destination ?: return
-        val uri = Uri.parse("https://waze.com/ul?ll=${d.lat},${d.lon}&navigate=yes")
+        openInWaze(d.lat, d.lon)
+    }
+
+    private fun openInWaze(lat: Double, lon: Double) {
+        val uri = Uri.parse("https://waze.com/ul?ll=$lat,$lon&navigate=yes")
         try {
             startActivity(Intent(Intent.ACTION_VIEW, uri))
         } catch (e: ActivityNotFoundException) {
@@ -1074,7 +1143,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         // Sans Lufop, on prend les radars OSM sur tout l'itinéraire ; les bornes seulement autour de l'arrivée.
         try {
             val found = ArrayList<Alert>()
-            if (lufopStore.all().isEmpty()) found += Net.osmAlerts(south, west, north, east, chargers = false)
+            if (lufopStore.all().none { it.type != AlertType.BORNE }) found += Net.osmAlerts(south, west, north, east, chargers = false)
             if (settings.showChargers) {
                 val end = r.points.last()
                 found += Net.osmAlerts(end[0] - 0.05, end[1] - 0.075, end[0] + 0.05, end[1] + 0.075, chargers = true)
@@ -1112,33 +1181,52 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         computeRouteAlerts()
     }
 
-    private fun syncLufop(manual: Boolean, forceFull: Boolean = false) {
-        val key = settings.lufopKey
-        if (key.isBlank()) return
-        if (manual) toast("Mise à jour des radars Lufop…")
+    /** Ouvre le sélecteur de fichiers pour importer une base Lufop (CSV, GPX, KML, OV2 ou ZIP). */
+    private fun importRadarFile() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+        try {
+            @Suppress("DEPRECATION")
+            startActivityForResult(intent, REQ_IMPORT)
+        } catch (e: ActivityNotFoundException) {
+            toast("Aucun gestionnaire de fichiers disponible")
+        }
+    }
+
+    @Deprecated("API Activity simple, suffisante ici")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_IMPORT || resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        val fileName = contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+        } ?: uri.lastPathSegment ?: "fichier"
+        toast("Import de $fileName…")
         io.execute {
             try {
-                val result = lufopStore.sync(key, forceFull)
+                val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: throw IllegalStateException("Fichier illisible")
+                val items = RadarFile.parse(fileName, bytes)
+                if (items.isEmpty()) throw IllegalStateException("Aucun point reconnu dans « $fileName ». Formats acceptés : CSV, GPX, KML, OV2 ou ZIP.")
+                val result = lufopStore.import(items)
                 main.post {
                     refreshAlertLayer()
                     computeRouteAlerts()
-                    when {
-                        result.full -> toast("Lufop : ${result.total} radars chargés")
-                        result.added.isNotEmpty() -> toast("Lufop : ${result.added.size} nouveautés radar (menu ☰)")
-                        manual -> toast("Lufop : aucune nouveauté")
-                    }
+                    val byType = items.groupingBy { it.type }.eachCount().entries
+                        .joinToString("\n") { "${alertIcon(it.key)}  ${it.key.label} : ${it.value}" }
+                    val sheet = Sheet(this).title("📥  Import réussi", fileName).text(byType)
+                    if (!result.firstImport) sheet.text(
+                        if (result.added.isEmpty()) "Aucune nouveauté par rapport au précédent import."
+                        else "${result.added.size} nouveautés depuis le précédent import."
+                    )
+                    if (result.added.isNotEmpty()) sheet.primary("Voir les nouveautés") { showLufopNews() }
+                    sheet.secondary("Fermer") {}.show()
                 }
             } catch (e: Exception) {
                 main.post {
-                    if (manual) {
-                        AlertDialog.Builder(this)
-                            .setTitle("Erreur Lufop")
-                            .setMessage(e.message ?: e.toString())
-                            .setPositiveButton("OK", null)
-                            .show()
-                    } else {
-                        toast("Lufop indisponible : ${e.message?.take(80)}")
-                    }
+                    Sheet(this).title("Import impossible").text(e.message ?: e.toString()).secondary("Fermer") {}.show()
                 }
             }
         }
@@ -1150,104 +1238,100 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     }
 
     private fun showReportDialogAt(lat: Double, lon: Double) {
-        val types = AlertType.reportable
-        AlertDialog.Builder(this)
-            .setTitle("Que voulez-vous signaler ?")
-            .setItems(types.map { it.label }.toTypedArray()) { _, which ->
-                val alert = alertStore.add(types[which], lat, lon)
+        val sheet = Sheet(this).title("Que voulez-vous signaler ?")
+        AlertType.reportable.forEach { type ->
+            sheet.item(alertIcon(type), type.label, color = pale(type.color)) {
+                val alert = alertStore.add(type, lat, lon)
                 spoken.add("a-${alert.id}") // pas d'annonce pour sa propre alerte
                 refreshAlertLayer()
                 computeRouteAlerts()
                 toast("${alert.type.label} signalé")
             }
-            .setNegativeButton("Annuler", null)
-            .show()
+        }
+        sheet.show()
     }
 
     // ---------- POIs ----------
 
     private fun showLongPressMenu(lat: Double, lon: Double) {
-        AlertDialog.Builder(this)
-            .setItems(arrayOf("Itinéraire vers ce point", "Ajouter un POI ici", "Signaler ici")) { _, which ->
-                when (which) {
-                    0 -> setDestination(Place("Point sur la carte", String.format(Locale.FRANCE, "%.5f, %.5f", lat, lon), lat, lon))
-                    1 -> showAddPoiDialog(lat, lon)
-                    2 -> showReportDialogAt(lat, lon)
-                }
-            }
-            .show()
+        val sheet = Sheet(this).title("Point sélectionné", listOfNotNull(
+            String.format(Locale.FRANCE, "%.5f, %.5f", lat, lon), distanceLabel(lat, lon)
+        ).joinToString(" · "))
+        sheet.primary("▲  Y aller") {
+            setDestination(Place("Point sur la carte", String.format(Locale.FRANCE, "%.5f, %.5f", lat, lon), lat, lon))
+        }
+        sheet.item("⭐", "Ajouter un POI ici", color = "#FEF7E0") { showAddPoiDialog(lat, lon) }
+        sheet.item("⚠️", "Signaler ici", color = "#FCE8E6") { showReportDialogAt(lat, lon) }
+        sheet.item("🧭", "Ouvrir dans Waze", color = "#E8F0FE") { openInWaze(lat, lon) }
+        sheet.show()
     }
 
     private fun showAddPoiDialog(lat: Double, lon: Double) {
-        val layout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(8), dp(24), 0)
-        }
-        val name = EditText(this).apply {
-            hint = "Nom du POI"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-        }
-        val categories = PoiCategory.entries
-        val spinner = Spinner(this).apply {
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, categories.map { it.label })
-        }
-        layout.addView(name)
-        layout.addView(spinner)
+        val sheet = Sheet(this).title("⭐  Nouveau POI", distanceLabel(lat, lon))
+        val name = sheet.input("Nom du POI")
         // Nom proposé d'après l'adresse, modifiable
         io.execute {
             val suggestion = try { Net.reverse(lat, lon) } catch (e: Exception) { null }
             if (suggestion != null) main.post { if (name.text.isEmpty()) name.setText(suggestion) }
         }
-        AlertDialog.Builder(this)
-            .setTitle("Nouveau POI")
-            .setView(layout)
-            .setPositiveButton("Enregistrer") { _, _ ->
-                val label = name.text.toString().trim().ifBlank { categories[spinner.selectedItemPosition].label }
-                poiStore.add(label, categories[spinner.selectedItemPosition], lat, lon)
+        sheet.sectionTitle("Catégorie (touchez pour enregistrer)")
+        PoiCategory.entries.forEach { cat ->
+            sheet.item(poiIcon(cat), cat.label, color = pale(cat.color)) {
+                val label = name.text.toString().trim().ifBlank { cat.label }
+                poiStore.add(label, cat, lat, lon)
                 refreshPoiLayer()
                 toast("POI « $label » ajouté")
             }
-            .setNegativeButton("Annuler", null)
-            .show()
+        }
+        sheet.show()
+    }
+
+    private fun poiIcon(c: PoiCategory) = when (c) {
+        PoiCategory.FAVORI -> "⭐"
+        PoiCategory.MAISON -> "🏠"
+        PoiCategory.TRAVAIL -> "💼"
+        PoiCategory.STATION -> "⛽"
+        PoiCategory.RECHARGE -> "🔌"
+        PoiCategory.RESTAURANT -> "🍽️"
+        PoiCategory.PARKING -> "🅿️"
+        PoiCategory.AUTRE -> "📍"
     }
 
     private fun showPoiList() {
         val loc = lastLocation
         val pois = poiStore.all().sortedBy { p -> loc?.let { Geo.distance(it.latitude, it.longitude, p.lat, p.lon) } ?: 0.0 }
+        val sheet = Sheet(this).title("Mes POIs", if (pois.isEmpty()) null else "${pois.size} lieux enregistrés")
         if (pois.isEmpty()) {
-            AlertDialog.Builder(this)
-                .setTitle("Mes POIs")
-                .setMessage("Aucun POI pour l'instant. Faites un appui long sur la carte, ou utilisez « Ajouter ma position en POI ».")
-                .setPositiveButton("OK", null)
-                .show()
-            return
+            sheet.text("Aucun POI pour l'instant. Faites un appui long sur la carte, ou ajoutez votre position actuelle.")
+            sheet.primary("Ajouter ma position") { loc?.let { showAddPoiDialog(it.latitude, it.longitude) } }
         }
-        val labels = pois.map { p ->
-            val dist = loc?.let { " · " + Geo.formatDistance(Geo.distance(it.latitude, it.longitude, p.lat, p.lon)) } ?: ""
-            "${p.name}\n${p.category.label}$dist"
+        pois.forEach { p ->
+            sheet.item(poiIcon(p.category), p.name, listOfNotNull(p.category.label, distanceLabel(p.lat, p.lon)).joinToString(" · "), pale(p.category.color)) {
+                showPoiActions(p)
+            }
         }
-        AlertDialog.Builder(this)
-            .setTitle("Mes POIs")
-            .setItems(labels.toTypedArray()) { _, which -> showPoiActions(pois[which]) }
-            .setNegativeButton("Fermer", null)
-            .show()
+        sheet.show()
     }
 
     private fun showPoiActions(p: Poi) {
-        AlertDialog.Builder(this)
-            .setTitle(p.name)
-            .setItems(arrayOf("Y aller", "Voir sur la carte", "Supprimer")) { _, which ->
-                when (which) {
-                    0 -> if (!navigating) setDestination(p.toPlace()) else toast("Arrêtez d'abord le guidage")
-                    1 -> map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(p.lat, p.lon), 16.0))
-                    2 -> {
-                        poiStore.remove(p.id)
-                        refreshPoiLayer()
-                        toast("POI supprimé")
-                    }
-                }
-            }
-            .show()
+        val sheet = Sheet(this).title("${poiIcon(p.category)}  ${p.name}", listOfNotNull(p.category.label, distanceLabel(p.lat, p.lon)).joinToString(" · "))
+        if (navigating) {
+            sheet.primary("Faire un arrêt ici") { addStop(p.toPlace()) }
+        } else {
+            sheet.primary("▲  Y aller") { setDestination(p.toPlace()) }
+        }
+        sheet.secondary("Voir sur la carte") { showOnMap(p.lat, p.lon) }
+        sheet.secondary("Supprimer") {
+            poiStore.remove(p.id)
+            refreshPoiLayer()
+            toast("POI supprimé")
+        }
+        sheet.show()
+    }
+
+    private fun showOnMap(lat: Double, lon: Double) {
+        if (navigating && locationReady) map?.locationComponent?.cameraMode = CameraMode.NONE
+        map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(lat, lon), 16.0))
     }
 
     // ---------- Agenda ----------
@@ -1285,24 +1369,16 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         }
         val events = try { Agenda.upcoming(this) } catch (e: Exception) { emptyList() }
         agendaEvents = events
+        val sheet = Sheet(this).title("📅  Mon agenda", "Rendez-vous avec un lieu, 7 prochains jours")
         if (events.isEmpty()) {
-            AlertDialog.Builder(this)
-                .setTitle("Mon agenda")
-                .setMessage("Aucun rendez-vous avec une adresse dans les 7 prochains jours.\n\nAstuce : renseignez le champ « Lieu » de vos rendez-vous dans Google Agenda.")
-                .setPositiveButton("OK", null)
-                .show()
-            return
+            sheet.text("Aucun rendez-vous avec une adresse.\n\nAstuce : remplissez le champ « Lieu » de vos rendez-vous dans Google Agenda.")
         }
-        AlertDialog.Builder(this)
-            .setTitle("Mon agenda (7 jours)")
-            .setItems(events.map { "${it.whenLabel()} · ${it.title}\n${it.location}" }.toTypedArray()) { _, which ->
-                goToAgendaEvent(events[which])
-            }
-            .setNegativeButton("Fermer", null)
-            .show()
+        events.forEach { e ->
+            sheet.item("📅", "${e.whenLabel()} · ${e.title}", e.location, "#E8F0FE") { goToAgendaEvent(e) }
+        }
+        sheet.show()
     }
 
-    /** Cherche l'adresse du rendez-vous puis calcule l'itinéraire. */
     private fun goToAgendaEvent(e: AgendaEvent) {
         val loc = lastLocation
         toast("Recherche de « ${e.location} »…")
@@ -1327,7 +1403,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         val center = brandsCenter
         if (center != null && center.distanceTo(loc) < 15_000) return
         brandsCenter = loc
-        val d = 0.3
+        val d = 0.2
         io.execute {
             try {
                 val found = Nearby.brands(loc.latitude - d, loc.longitude - d * 1.5, loc.latitude + d, loc.longitude + d * 1.5)
@@ -1360,14 +1436,12 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     }
 
     private fun showFoodMenu() {
-        AlertDialog.Builder(this)
-            .setItems(arrayOf("McDonald's et Burger King", "Tous les restaurants")) { _, which ->
-                if (which == 0) showBrands() else showRestaurants()
-            }
+        Sheet(this).title("Manger")
+            .item("🍟", "McDonald's et Burger King", if (navigating) "Sur mon trajet" else "Les plus proches", "#FFF3C4") { showBrands() }
+            .item("🍽️", "Tous les restaurants", if (navigating) "Sur mon trajet" else "Autour de moi", "#FDE7DD") { showRestaurants() }
             .show()
     }
 
-    /** Points où chercher : devant soi sur le trajet pendant le guidage, sinon autour de soi. */
     private fun searchPoints(aheadKm: List<Int>): List<DoubleArray> {
         val loc = lastLocation ?: return emptyList()
         val r = route
@@ -1391,7 +1465,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         toast("Recherche des McDo et Burger King…")
         io.execute {
             try {
-                val d = 0.3
+                val d = 0.2
                 val found = Nearby.brands(loc.latitude - d, loc.longitude - d * 1.5, loc.latitude + d, loc.longitude + d * 1.5)
                 main.post {
                     mergeBrands(found)
@@ -1447,6 +1521,10 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
      * Liste triée : pendant le guidage, les lieux devant soi à moins de 1,5 km du trajet
      * (dans l'ordre de passage) ; sinon les plus proches.
      */
+    /**
+     * Liste triée : pendant le guidage, les lieux devant soi à moins de 1,5 km du trajet
+     * (dans l'ordre de passage) ; sinon les plus proches.
+     */
     private fun showNearbyList(title: String, items: List<NearbyPlace>, sortableByPrice: Boolean = false, byPrice: Boolean = false) {
         val loc = lastLocation ?: return
         val r = route
@@ -1469,52 +1547,149 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             toast(if (navigating) "Aucun résultat le long du trajet" else "Aucun résultat à proximité")
             return
         }
-        val labels = shown.map { (n, where) ->
-            val star = when (n.brand) { "mcdo" -> "🍟 "; "bk" -> "👑 "; else -> "" }
-            "$star${n.name} · $where" + (n.detail?.let { "\n$it" } ?: "")
-        }
-        val builder = AlertDialog.Builder(this)
-            .setTitle(title)
-            .setItems(labels.toTypedArray()) { _, which -> showNearbyActions(shown[which].first) }
-            .setNegativeButton("Fermer", null)
+        val fuelLabel = Nearby.fuels.firstOrNull { it.first == settings.fuel }?.second ?: ""
+        val sheet = Sheet(this).title(title, if (sortableByPrice) "Prix du $fuelLabel · ${if (byPrice) "moins chères d'abord" else "plus proches d'abord"}" else null)
         if (sortableByPrice) {
-            builder.setNeutralButton(if (byPrice) "Trier par distance" else "Moins chères d'abord") { _, _ ->
+            sheet.secondary(if (byPrice) "Trier par distance" else "€  Moins chères d'abord") {
                 showNearbyList(title, items, sortableByPrice = true, byPrice = !byPrice)
             }
         }
-        builder.show()
+        shown.forEach { (n, where) ->
+            val (icon, color) = when {
+                n.brand == "mcdo" -> "🍟" to "#FFF3C4"
+                n.brand == "bk" -> "👑" to "#FDE7DD"
+                n.kind == NearbyKind.STATION -> "⛽" to "#FCE8E6"
+                else -> "🍽️" to "#FDE7DD"
+            }
+            val title2 = if (n.kind == NearbyKind.STATION) {
+                (n.price?.let { "${Nearby.fmtPrice(it)}  ·  " } ?: "") + (n.city ?: n.name)
+            } else n.name
+            val subtitle = if (n.kind == NearbyKind.STATION) listOfNotNull(where, n.address).joinToString(" · ")
+            else listOfNotNull(where, n.detail).joinToString(" · ")
+            sheet.item(icon, title2, subtitle, color) {
+                if (n.kind == NearbyKind.STATION) showStationCard(n) else showPlaceCard(n)
+            }
+        }
+        sheet.show()
     }
 
-    private fun showNearbyActions(n: NearbyPlace) {
-        val options = if (navigating) arrayOf("Faire un arrêt ici", "Remplacer la destination", "Voir sur la carte")
-        else arrayOf("Y aller", "Enregistrer en POI", "Voir sur la carte")
-        AlertDialog.Builder(this)
-            .setTitle(n.name)
-            .setMessage(n.detail)
-            .setItems(options) { _, which ->
-                when {
-                    which == 2 -> {
-                        if (navigating && locationReady) map?.locationComponent?.cameraMode = CameraMode.NONE
-                        map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(n.lat, n.lon), 16.0))
-                    }
-                    navigating && which == 0 -> addStop(n.toPlace())
-                    navigating && which == 1 -> {
-                        stopNavigation()
-                        setDestination(n.toPlace())
-                    }
-                    which == 0 -> setDestination(n.toPlace())
-                    else -> {
-                        val category = if (n.kind == NearbyKind.STATION) PoiCategory.STATION else PoiCategory.RESTAURANT
-                        poiStore.add(n.name, category, n.lat, n.lon)
-                        refreshPoiLayer()
-                        toast("POI « ${n.name} » ajouté")
+    /** Fiche d'un lieu : nom, infos, distance et gros bouton pour s'y rendre. */
+    private fun showPlaceCard(n: NearbyPlace) {
+        if (n.kind == NearbyKind.STATION) { showStationCard(n); return }
+        val icon = when (n.brand) { "mcdo" -> "🍟"; "bk" -> "👑"; else -> "🍽️" }
+        val sheet = Sheet(this).title("$icon  ${n.name}", listOfNotNull(n.detail, distanceLabel(n.lat, n.lon)).joinToString(" · "))
+        placeActions(sheet, n)
+        sheet.show()
+    }
+
+    /** Fiche station : prix lisibles en grand, carburant préféré mis en avant. */
+    private fun showStationCard(n: NearbyPlace) {
+        if (n.prices.isEmpty() && n.id.startsWith("base-")) {
+            // Station touchée sur le fond de carte : on cherche ses prix officiels
+            val fuel = settings.fuel
+            io.execute {
+                val match = try {
+                    Nearby.stations(n.lat, n.lon, 1, fuel)
+                        .map { it to Geo.distance(n.lat, n.lon, it.lat, it.lon) }
+                        .filter { it.second < 250 }
+                        .minByOrNull { it.second }?.first
+                } catch (e: Exception) { null }
+                val merged = match?.copy(id = "fuel-" + n.id, name = n.name, lat = n.lat, lon = n.lon) ?: n.copy(id = "noprice-${n.lat}")
+                main.post { showStationCard(merged) }
+            }
+            return
+        }
+        val sheet = Sheet(this).title("⛽  ${n.name}", listOfNotNull(n.address, distanceLabel(n.lat, n.lon)).joinToString(" · "))
+        if (n.prices.isEmpty()) {
+            sheet.text("Prix non communiqués pour cette station.", "#5F6368")
+        } else {
+            sheet.view(priceGrid(n.prices))
+            n.updated?.let { sheet.text("Prix mis à jour ${relativeDate(it)}", "#5F6368", 13f) }
+        }
+        placeActions(sheet, n)
+        sheet.show()
+    }
+
+    private fun placeActions(sheet: Sheet, n: NearbyPlace) {
+        if (navigating) {
+            sheet.primary("Faire un arrêt ici") { addStop(n.toPlace()) }
+            sheet.secondary("Remplacer la destination") {
+                stopNavigation()
+                setDestination(n.toPlace())
+            }
+        } else {
+            sheet.primary("▲  Y aller") { setDestination(n.toPlace()) }
+            sheet.secondary("Ouvrir dans Waze") { openInWaze(n.lat, n.lon) }
+            sheet.secondary("Enregistrer en POI") {
+                val category = if (n.kind == NearbyKind.STATION) PoiCategory.STATION else PoiCategory.RESTAURANT
+                poiStore.add(n.name, category, n.lat, n.lon)
+                refreshPoiLayer()
+                toast("POI « ${n.name} » ajouté")
+            }
+        }
+    }
+
+    /** Grille de prix : 3 cases par ligne, le carburant préféré en bleu. */
+    private fun priceGrid(prices: Map<String, Double>): View {
+        val grid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val ordered = Nearby.fuels.filter { prices.containsKey(it.first) }
+            .sortedBy { if (it.first == settings.fuel) 0 else 1 }
+        ordered.chunked(3).forEach { rowFuels ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            rowFuels.forEachIndexed { i, (key, label) ->
+                val preferred = key == settings.fuel
+                val cell = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = android.view.Gravity.CENTER
+                    setPadding(dp(6), dp(10), dp(6), dp(10))
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setColor(Color.parseColor(if (preferred) "#1A73E8" else "#F1F3F4"))
+                        cornerRadius = dp(14).toFloat()
                     }
                 }
+                cell.addView(TextView(this).apply {
+                    text = label
+                    textSize = 13f
+                    setTextColor(Color.parseColor(if (preferred) "#D2E3FC" else "#5F6368"))
+                })
+                cell.addView(TextView(this).apply {
+                    text = String.format(Locale.FRANCE, "%.3f", prices[key])
+                    textSize = 22f
+                    setTypeface(typeface, android.graphics.Typeface.BOLD)
+                    setTextColor(if (preferred) Color.WHITE else Color.parseColor("#202124"))
+                })
+                cell.addView(TextView(this).apply {
+                    text = "€ / L"
+                    textSize = 11f
+                    setTextColor(Color.parseColor(if (preferred) "#D2E3FC" else "#80868B"))
+                })
+                row.addView(cell, LinearLayout.LayoutParams(0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    if (i > 0) marginStart = dp(8)
+                })
             }
-            .show()
+            // cases vides pour garder l'alignement
+            repeat(3 - rowFuels.size) { row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f).apply { marginStart = dp(8) }) }
+            grid.addView(row, LinearLayout.LayoutParams(android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(8)
+            })
+        }
+        return grid
     }
 
-    /** Ajoute une étape avant la destination et recalcule le trajet. */
+    /** « il y a 3 h », « hier », « le 21/10 ». */
+    private fun relativeDate(iso: String): String {
+        val date = listOf("yyyy-MM-dd'T'HH:mm:ssXXX", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm:ss").firstNotNullOfOrNull { f ->
+            try { SimpleDateFormat(f, Locale.US).parse(if (f.endsWith("XXX")) iso else iso.take(19)) } catch (e: Exception) { null }
+        } ?: return iso
+        val minutes = (System.currentTimeMillis() - date.time) / 60_000
+        return when {
+            minutes < 60 -> "il y a ${minutes.coerceAtLeast(1)} min"
+            minutes < 24 * 60 -> "il y a ${minutes / 60} h"
+            minutes < 48 * 60 -> "hier"
+            else -> "le " + SimpleDateFormat("dd/MM", Locale.FRANCE).format(date)
+        }
+    }
+
     private fun addStop(place: Place) {
         val loc = lastLocation ?: return
         val dest = destination ?: return
@@ -1526,139 +1701,121 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     // ---------- Menu et réglages ----------
 
     private fun showMainMenu() {
-        AlertDialog.Builder(this)
-            .setItems(arrayOf("Mon agenda", "Mes POIs", "Ajouter ma position en POI", "Stations-service", "Restaurants", "McDonald's et Burger King", "Nouveautés radars Lufop", "Réglages")) { _, which ->
-                when (which) {
-                    0 -> showAgenda()
-                    1 -> showPoiList()
-                    2 -> lastLocation?.let { showAddPoiDialog(it.latitude, it.longitude) } ?: toast("Position GPS pas encore disponible")
-                    3 -> showStations()
-                    4 -> showRestaurants()
-                    5 -> showBrands()
-                    6 -> showLufopNews()
-                    7 -> showSettings()
-                }
+        val next = agendaEvents.firstOrNull()
+        val lufopCount = lufopStore.all().size
+        Sheet(this)
+            .title("GPS Perso")
+            .item("📅", "Mon agenda", next?.let { "${it.whenLabel()} · ${it.title}" } ?: "Rendez-vous avec une adresse", "#E8F0FE") { showAgenda() }
+            .item("⭐", "Mes POIs", "${poiStore.all().size} lieux enregistrés", "#FEF7E0") { showPoiList() }
+            .item("📍", "Ajouter ma position en POI", null, "#E6F4EA") {
+                lastLocation?.let { showAddPoiDialog(it.latitude, it.longitude) } ?: toast("Position GPS pas encore disponible")
             }
+            .item("⛽", "Stations-service", "Prix du carburant", "#FCE8E6") { showStations() }
+            .item("🍽️", "Restaurants", null, "#FDE7DD") { showRestaurants() }
+            .item("🍟", "McDonald's et Burger King", null, "#FFF3C4") { showBrands() }
+            .item("📥", "Importer un fichier Lufop", if (lufopCount > 0) "$lufopCount points importés le ${lufopStore.lastImport}" else "Radars, bornes… (CSV, GPX, KML, OV2, ZIP)", "#F3E8FD") { importRadarFile() }
+            .item("🆕", "Nouveautés radars", "Depuis le dernier import", "#F3E8FD") { showLufopNews() }
+            .item("⚙️", "Réglages", null, "#F1F3F4") { showSettings() }
             .show()
     }
 
     private fun showLufopNews() {
-        if (!settings.hasLufop) {
-            toast("Ajoutez d'abord votre clé Lufop dans les Réglages")
-            return
-        }
         val recent = lufopStore.recent()
-        val sync = lufopStore.lastSync?.let { "Dernière mise à jour : $it" } ?: "Jamais mis à jour"
+        val sheet = Sheet(this).title("🆕  Nouveautés radars", lufopStore.lastImport?.let { "Import du $it" } ?: "Aucun import pour l'instant")
         if (recent.isEmpty()) {
-            AlertDialog.Builder(this)
-                .setTitle("Nouveautés radars")
-                .setMessage("Aucune nouveauté lors de la dernière mise à jour.\n\n$sync\n${lufopStore.all().size} radars en mémoire.")
-                .setPositiveButton("OK", null)
-                .setNeutralButton("Mettre à jour") { _, _ -> syncLufop(manual = true) }
-                .show()
-            return
+            sheet.text("Aucune nouveauté lors du dernier import.\n\nTéléchargez le fichier à jour sur lufop.net puis importez-le : l'appli vous montrera ce qui a changé.")
+            sheet.primary("Importer un fichier") { importRadarFile() }
         }
-        AlertDialog.Builder(this)
-            .setTitle("Nouveautés radars (${recent.size})")
-            .setItems(recent.map { "${it.title}\n${it.description ?: ""}" }.toTypedArray()) { _, which ->
-                val a = recent[which]
-                map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(a.lat, a.lon), 16.0))
+        recent.take(100).forEach { a ->
+            sheet.item(alertIcon(a.type), a.title, listOfNotNull(a.description, distanceLabel(a.lat, a.lon)).joinToString(" · "), pale(a.type.color)) {
+                showOnMap(a.lat, a.lon)
             }
-            .setPositiveButton("Fermer", null)
-            .show()
+        }
+        sheet.show()
     }
 
     private fun showSettings() {
-        val layout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(8), dp(24), 0)
-        }
-        fun label(text: String) = TextView(this).apply {
-            this.text = text
-            setPadding(0, dp(12), 0, 0)
-            setTextColor(Color.parseColor("#5F6368"))
-        }
-        val tomtom = EditText(this).apply {
-            setText(settings.tomtomKey)
-            hint = "Clé API TomTom"
-            isSingleLine = true
-        }
-        val lufop = EditText(this).apply {
-            setText(settings.lufopKey)
-            hint = "Clé API Lufop"
-            isSingleLine = true
-        }
-        val chargers = CheckBox(this).apply {
-            text = "Afficher les bornes de recharge"
-            isChecked = settings.showChargers
-        }
-        val radars = CheckBox(this).apply {
-            text = "Annoncer les radars"
-            isChecked = settings.announceRadars
-        }
-        val lufopInfo = lufopStore.lastSync?.let { "Lufop : ${lufopStore.all().size} radars, mis à jour le $it" }
-            ?: "Lufop : pas encore téléchargé"
-        layout.addView(label("Trafic en temps réel (developer.tomtom.com)"))
-        layout.addView(tomtom)
-        layout.addView(label("Radars Lufop (api.lufop.net)"))
-        layout.addView(lufop)
-        layout.addView(label(lufopInfo))
-        layout.addView(chargers)
-        layout.addView(radars)
-        val brands = CheckBox(this).apply {
-            text = "Afficher McDonald's et Burger King"
-            isChecked = settings.showBrands
-        }
-        layout.addView(brands)
-        val iconKeys = listOf("fleche", "voiture_rouge", "voiture_noire", "voiture_bleue", "moto", "camion")
-        val iconLabels = listOf("Flèche bleue", "Voiture rouge", "Voiture noire", "Voiture bleue", "Moto", "Camion")
-        val iconSpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, iconLabels)
-            setSelection(iconKeys.indexOf(settings.positionIcon).coerceAtLeast(0))
-        }
-        layout.addView(label("Icône de ma position"))
-        layout.addView(iconSpinner)
-        val fuelSpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, Nearby.fuels.map { it.second })
-            setSelection(Nearby.fuels.indexOfFirst { it.first == settings.fuel }.coerceAtLeast(0))
-        }
-        layout.addView(label("Mon carburant"))
-        layout.addView(fuelSpinner)
+        val sheet = Sheet(this).title("⚙️  Réglages")
+        sheet.sectionTitle("Trafic en temps réel (TomTom)")
+        val tomtom = sheet.input("Clé API TomTom (developer.tomtom.com)", settings.tomtomKey)
+        sheet.sectionTitle("Affichage")
+        val chargers = switchRow("Bornes de recharge sur la carte", settings.showChargers)
+        val brands = switchRow("McDonald's et Burger King en évidence", settings.showBrands)
+        val radars = switchRow("Annonces vocales des radars", settings.announceRadars)
+        sheet.view(chargers).view(brands).view(radars)
 
-        fun save(): Boolean {
-            val lufopChanged = lufop.text.toString().trim() != settings.lufopKey
+        fun save() {
             settings.tomtomKey = tomtom.text.toString()
-            settings.lufopKey = lufop.text.toString()
             settings.showChargers = chargers.isChecked
-            settings.announceRadars = radars.isChecked
             settings.showBrands = brands.isChecked
-            settings.positionIcon = iconKeys[iconSpinner.selectedItemPosition.coerceAtLeast(0)]
-            settings.fuel = Nearby.fuels[fuelSpinner.selectedItemPosition.coerceAtLeast(0)].first
-            applyPositionIcon()
-            refreshBrandLayer()
+            settings.announceRadars = radars.isChecked
             updateTrafficButton()
             updateTrafficLayer()
+            refreshBrandLayer()
             osmCenter = null
-            lastLocation?.let { maybeLoadOsmAround(it) }
+            brandsCenter = null
+            lastLocation?.let {
+                maybeLoadOsmAround(it)
+                maybeLoadBrandsAround(it)
+            }
             lastIncidentsAt = 0
             periodicRefresh()
             refreshAlertLayer()
             computeRouteAlerts()
-            return lufopChanged
         }
 
-        AlertDialog.Builder(this)
-            .setTitle("Réglages")
-            .setView(ScrollView(this).apply { addView(layout) })
-            .setPositiveButton("Enregistrer") { _, _ ->
-                if (save() && settings.hasLufop) syncLufop(manual = true, forceFull = true)
+        val iconLabels = mapOf(
+            "fleche" to "Flèche bleue", "voiture_rouge" to "Voiture rouge", "voiture_noire" to "Voiture noire",
+            "voiture_bleue" to "Voiture bleue", "moto" to "Moto", "camion" to "Camion",
+        )
+        val fuelLabel = Nearby.fuels.firstOrNull { it.first == settings.fuel }?.second ?: settings.fuel
+        sheet.sectionTitle("Mon véhicule")
+        sheet.item("🚗", "Icône de ma position", iconLabels[settings.positionIcon], "#E8F0FE") {
+            save()
+            val choice = Sheet(this).title("Icône de ma position")
+            iconLabels.forEach { (key, label) ->
+                choice.item(if (key == settings.positionIcon) "✓" else "", label, null, "#E8F0FE") {
+                    settings.positionIcon = key
+                    applyPositionIcon()
+                    showSettings()
+                }
             }
-            .setNeutralButton("Mettre à jour Lufop") { _, _ ->
-                save()
-                if (settings.hasLufop) syncLufop(manual = true) else toast("Clé Lufop manquante")
+            choice.show()
+        }
+        sheet.item("⛽", "Mon carburant", fuelLabel, "#FCE8E6") {
+            save()
+            val choice = Sheet(this).title("Mon carburant")
+            Nearby.fuels.forEach { (key, label) ->
+                choice.item(if (key == settings.fuel) "✓" else "", label, null, "#FCE8E6") {
+                    settings.fuel = key
+                    showSettings()
+                }
             }
-            .setNegativeButton("Annuler", null)
-            .show()
+            choice.show()
+        }
+        sheet.sectionTitle("Radars Lufop")
+        val count = lufopStore.all().size
+        sheet.item("📥", "Importer un fichier", if (count > 0) "$count points, importés le ${lufopStore.lastImport}" else "Téléchargez la base sur lufop.net puis importez-la", "#F3E8FD") {
+            save()
+            importRadarFile()
+        }
+        if (count > 0) sheet.item("🗑️", "Effacer la base importée", null, "#F1F3F4") {
+            save()
+            lufopStore.clear()
+            refreshAlertLayer()
+            computeRouteAlerts()
+            toast("Base Lufop effacée")
+        }
+        sheet.primary("Enregistrer") { save() }
+        sheet.show()
+    }
+
+    private fun switchRow(label: String, checked: Boolean) = Switch(this).apply {
+        text = label
+        textSize = 16f
+        isChecked = checked
+        setTextColor(Color.parseColor("#202124"))
+        setPadding(dp(4), dp(12), dp(4), dp(12))
     }
 
     // ---------- Voix ----------
@@ -1697,10 +1854,10 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     override fun onBackPressed() {
         when {
             searchResults.visibility == View.VISIBLE -> hideSearchResults()
-            navigating -> AlertDialog.Builder(this)
-                .setMessage("Arrêter le guidage ?")
-                .setPositiveButton("Arrêter") { _, _ -> stopNavigation() }
-                .setNegativeButton("Continuer", null)
+            navigating -> Sheet(this)
+                .title("Arrêter le guidage ?")
+                .primary("Arrêter", "#D93025") { stopNavigation() }
+                .secondary("Continuer") {}
                 .show()
             route != null -> clearRoute()
             else -> @Suppress("DEPRECATION") super.onBackPressed()

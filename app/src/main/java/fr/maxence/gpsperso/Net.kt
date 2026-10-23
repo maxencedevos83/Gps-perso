@@ -19,7 +19,13 @@ object Net {
     private const val USER_AGENT = "GPSPerso/0.1 (application personnelle Android)"
     private const val PHOTON = "https://photon.komoot.io/api/"
     private const val VALHALLA = "https://valhalla1.openstreetmap.de/route"
-    private const val OVERPASS = "https://overpass-api.de/api/interpreter"
+    /** Plusieurs serveurs Overpass publics : si l'un est saturé, on passe au suivant. */
+    private val OVERPASS_SERVERS = listOf(
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass.private.coffee/api/interpreter",
+    )
+    private val overpassLock = Any()
 
     fun request(url: String, body: String? = null, contentType: String = "application/json"): String {
         val conn = URL(url).openConnection() as HttpURLConnection
@@ -42,6 +48,23 @@ object Net {
         } finally {
             conn.disconnect()
         }
+    }
+
+    /**
+     * Requête OpenStreetMap Overpass. Une seule à la fois (les serveurs refusent les rafales),
+     * avec bascule sur un autre serveur en cas d'erreur.
+     */
+    fun overpass(query: String): JSONObject = synchronized(overpassLock) {
+        var lastError: Exception? = null
+        for (server in OVERPASS_SERVERS) {
+            try {
+                val text = request(server, "data=${enc(query)}", "application/x-www-form-urlencoded")
+                return JSONObject(text)
+            } catch (e: Exception) {
+                lastError = e
+            }
+        }
+        throw IOException("Serveurs OpenStreetMap indisponibles, réessayez dans un instant (${lastError?.message?.take(60)})")
     }
 
     fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
@@ -127,7 +150,7 @@ object Net {
         val parts = StringBuilder("node[\"highway\"=\"speed_camera\"]$box;")
         if (chargers) parts.append("node[\"amenity\"=\"charging_station\"]$box;")
         val query = "[out:json][timeout:25];($parts);out;"
-        val json = JSONObject(request(OVERPASS, "data=${enc(query)}", "application/x-www-form-urlencoded"))
+        val json = overpass(query)
         val elements = json.getJSONArray("elements")
         val list = ArrayList<Alert>()
         for (i in 0 until elements.length()) {

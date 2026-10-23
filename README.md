@@ -17,7 +17,8 @@ L'APK est compilée automatiquement par GitHub Actions à chaque modification de
 - Itinéraire voiture (Valhalla), durée, distance et heure d'arrivée.
 - Guidage vocal en français, bandeau de manœuvre, recalcul automatique en cas d'écart.
 - Trafic en temps réel TomTom (bouton 🚦) : couleurs de fluidité, incidents annoncés (accidents, bouchons, travaux, routes fermées) et heure d'arrivée corrigée par les bouchons.
-- Radars : base Lufop (téléchargée une fois puis nouveautés chaque jour) ou, à défaut, radars OpenStreetMap.
+- Radars : import d'un fichier Lufop (CSV, GPX, KML, OV2 ou ZIP, menu ☰ › Importer) avec liste des nouveautés à chaque nouvel import ; à défaut, radars OpenStreetMap.
+- Toucher un lieu de la carte (station, resto, commerce…) ouvre sa fiche avec « Y aller » ; pour une station, les prix s'affichent en grand.
 - Bornes de recharge OpenStreetMap autour de soi et de la destination.
 - POIs perso : appui long sur la carte ou menu ☰ › Ajouter ma position, avec catégorie.
 - Bouton ⚠ pour signaler police, radar mobile, accident, danger, travaux, bouchon.
@@ -31,7 +32,6 @@ L'APK est compilée automatiquement par GitHub Actions à chaque modification de
 ## Clés gratuites (menu ☰ › Réglages)
 
 - **TomTom** (trafic) : compte sur https://developer.tomtom.com, puis copier la clé API.
-- **Lufop** (radars) : formulaire sur https://api.lufop.net/#apiAccessForm.
 
 ## Limites connues
 
