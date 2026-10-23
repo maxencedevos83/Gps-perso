@@ -21,7 +21,7 @@ object Net {
     private const val VALHALLA = "https://valhalla1.openstreetmap.de/route"
     private const val OVERPASS = "https://overpass-api.de/api/interpreter"
 
-    private fun request(url: String, body: String? = null, contentType: String = "application/json"): String {
+    fun request(url: String, body: String? = null, contentType: String = "application/json"): String {
         val conn = URL(url).openConnection() as HttpURLConnection
         try {
             conn.connectTimeout = 15_000
@@ -44,7 +44,7 @@ object Net {
         }
     }
 
-    private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
+    fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 
     fun search(query: String, nearLat: Double?, nearLon: Double?): List<Place> {
         var url = "$PHOTON?q=${enc(query)}&lang=fr&limit=8"
@@ -65,6 +65,16 @@ object Net {
             places.add(Place(name, address, coords.getDouble(1), coords.getDouble(0)))
         }
         return places
+    }
+
+    /** Adresse la plus proche d'un point (pour nommer un POI). */
+    fun reverse(lat: Double, lon: Double): String? {
+        val features = JSONObject(request("${PHOTON.removeSuffix("api/")}reverse?lat=$lat&lon=$lon&lang=fr&limit=1"))
+            .getJSONArray("features")
+        if (features.length() == 0) return null
+        val p = features.getJSONObject(0).getJSONObject("properties")
+        val street = listOf(p.optString("housenumber"), p.optString("street")).filter { it.isNotBlank() }.joinToString(" ")
+        return p.optString("name").ifBlank { street.ifBlank { p.optString("city") } }.ifBlank { null }
     }
 
     /**
@@ -98,23 +108,41 @@ object Net {
         return Route(points, maneuvers, trip.getJSONObject("summary").optDouble("time", 0.0))
     }
 
-    /** Radars fixes cartographiés dans OpenStreetMap à l'intérieur d'un rectangle. */
-    fun speedCameras(south: Double, west: Double, north: Double, east: Double): List<Alert> {
-        val query = "[out:json][timeout:25];node[\"highway\"=\"speed_camera\"]($south,$west,$north,$east);out;"
+    /**
+     * Radars (et bornes de recharge si demandé) cartographiés dans OpenStreetMap
+     * à l'intérieur d'un rectangle.
+     */
+    fun osmAlerts(south: Double, west: Double, north: Double, east: Double, chargers: Boolean): List<Alert> {
+        val box = "($south,$west,$north,$east)"
+        val parts = StringBuilder("node[\"highway\"=\"speed_camera\"]$box;")
+        if (chargers) parts.append("node[\"amenity\"=\"charging_station\"]$box;")
+        val query = "[out:json][timeout:25];($parts);out;"
         val json = JSONObject(request(OVERPASS, "data=${enc(query)}", "application/x-www-form-urlencoded"))
         val elements = json.getJSONArray("elements")
         val list = ArrayList<Alert>()
         for (i in 0 until elements.length()) {
             val e = elements.getJSONObject(i)
-            val maxspeed = e.optJSONObject("tags")?.optString("maxspeed")?.takeIf { it.isNotBlank() }
+            val tags = e.optJSONObject("tags")
+            val isCharger = tags?.optString("amenity") == "charging_station"
+            val detail = if (isCharger) {
+                tags?.optString("capacity")?.takeIf { it.isNotBlank() }?.let { "($it places)" }
+            } else {
+                tags?.optString("maxspeed")?.takeIf { it.isNotBlank() }
+            }
+            val description = if (isCharger) {
+                listOf(tags?.optString("name"), tags?.optString("operator"), tags?.optString("network"))
+                    .filter { !it.isNullOrBlank() }.distinct().joinToString(" · ").ifBlank { null }
+            } else null
             list.add(
                 Alert(
                     id = "osm-${e.getLong("id")}",
-                    type = AlertType.RADAR_FIXE,
+                    type = if (isCharger) AlertType.BORNE else AlertType.RADAR_FIXE,
                     lat = e.getDouble("lat"),
                     lon = e.getDouble("lon"),
                     createdAt = 0,
-                    detail = maxspeed,
+                    detail = detail,
+                    source = "osm",
+                    description = description,
                 )
             )
         }

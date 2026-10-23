@@ -8,22 +8,29 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
+import android.text.InputType
 import android.view.KeyEvent
 import android.view.View
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.ArrayAdapter
+import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import org.maplibre.android.MapLibre
@@ -41,8 +48,11 @@ import org.maplibre.android.style.layers.CircleLayer
 import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.PropertyFactory
+import org.maplibre.android.style.layers.RasterLayer
 import org.maplibre.android.style.layers.SymbolLayer
 import org.maplibre.android.style.sources.GeoJsonSource
+import org.maplibre.android.style.sources.RasterSource
+import org.maplibre.android.style.sources.TileSet
 import org.maplibre.geojson.Feature
 import org.maplibre.geojson.FeatureCollection
 import org.maplibre.geojson.LineString
@@ -60,6 +70,8 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         private const val OFF_ROUTE_METERS = 50.0
         private const val ALERT_AHEAD_METERS = 800.0
         private const val FREE_DRIVE_ALERT_METERS = 500.0
+        private const val INCIDENTS_REFRESH_MS = 15 * 60_000L
+        private const val ETA_REFRESH_MS = 10 * 60_000L
     }
 
     private lateinit var mapView: MapView
@@ -67,6 +79,9 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     private var style: Style? = null
     private var locationReady = false
 
+    private lateinit var topContainer: View
+    private lateinit var bottomContainer: View
+    private lateinit var navBarSpacer: View
     private lateinit var searchInput: EditText
     private lateinit var searchResults: ListView
     private lateinit var maneuverBanner: View
@@ -75,6 +90,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     private lateinit var maneuverText: TextView
     private lateinit var alertBanner: TextView
     private lateinit var speedText: TextView
+    private lateinit var btnTraffic: TextView
     private lateinit var routePanel: View
     private lateinit var routeTitle: TextView
     private lateinit var routeSummary: TextView
@@ -83,11 +99,16 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     private lateinit var navEta: TextView
     private lateinit var navRemaining: TextView
 
-    private val io = Executors.newFixedThreadPool(2)
+    private val io = Executors.newFixedThreadPool(3)
     private val main = Handler(Looper.getMainLooper())
+    private lateinit var settings: Settings
     private lateinit var alertStore: AlertStore
+    private lateinit var poiStore: PoiStore
+    private lateinit var lufopStore: LufopStore
     private var tts: TextToSpeech? = null
     private var ttsReady = false
+    private var insetTop = 0
+    private var insetBottom = 0
 
     private var lastLocation: Location? = null
     private var searchPlaces: List<Place> = emptyList()
@@ -100,51 +121,79 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     private var lastRerouteAt = 0L
     private val spoken = HashSet<String>()
 
-    /** Radars OSM autour de la zone utile (itinéraire ou position). */
-    private var cameras: List<Alert> = emptyList()
-    private var camerasCenter: Location? = null
-    private var camerasLoading = false
+    /** Durée de référence (trafic compris si dispo) pour une distance restante de référence. */
+    private var etaSeconds = 0.0
+    private var etaDistance = 0.0
+    private var trafficDelay = 0.0
+    private var lastEtaAt = 0L
+
+    /** Radars et bornes OSM autour de la zone utile. */
+    private var osmAlerts: List<Alert> = emptyList()
+    private var osmCenter: Location? = null
+    private var osmLoading = false
+    /** Incidents TomTom (accidents, bouchons, travaux...). */
+    private var incidents: Map<String, Alert> = emptyMap()
+    private var lastIncidentsAt = 0L
+    private var incidentsCenter: Location? = null
     /** Alertes situées sur l'itinéraire, avec leur position (m) depuis le départ. */
     private var routeAlerts: List<Pair<Alert, Double>> = emptyList()
+
+    private val ticker = object : Runnable {
+        override fun run() {
+            periodicRefresh()
+            main.postDelayed(this, 60_000)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         MapLibre.getInstance(this)
         setContentView(R.layout.activity_main)
+        settings = Settings(this)
         alertStore = AlertStore(this)
+        poiStore = PoiStore(this)
+        lufopStore = LufopStore(this)
         bindViews()
+        setupEdgeToEdge()
+        updateTrafficButton()
 
         mapView.onCreate(savedInstanceState)
         mapView.getMapAsync { m ->
             map = m
             m.uiSettings.isCompassEnabled = true
-            m.uiSettings.isAttributionEnabled = true
             m.uiSettings.isLogoEnabled = false
+            applyMapMargins()
             m.setStyle(Style.Builder().fromUri(STYLE_URL)) { s ->
                 style = s
                 setupLayers(s)
+                updateTrafficLayer()
                 enableLocation()
                 refreshAlertLayer()
+                refreshPoiLayer()
             }
             m.addOnMapLongClickListener { latLng ->
-                if (!navigating) {
-                    setDestination(Place("Point sur la carte", String.format(Locale.FRANCE, "%.5f, %.5f", latLng.latitude, latLng.longitude), latLng.latitude, latLng.longitude))
-                }
+                if (!navigating) showLongPressMenu(latLng.latitude, latLng.longitude)
                 true
             }
-            m.addOnMapClickListener {
+            m.addOnMapClickListener { latLng ->
                 hideSearchResults()
-                false
+                handleMapTap(latLng)
             }
             m.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(46.6, 2.4), 5.0))
         }
 
         tts = TextToSpeech(this, this)
         requestLocationPermission()
+        io.execute { lufopStore.all() } // préchargement du cache
+        if (settings.hasLufop && lufopStore.needsSync()) syncLufop(manual = false)
+        main.postDelayed(ticker, 60_000)
     }
 
     private fun bindViews() {
         mapView = findViewById(R.id.mapView)
+        topContainer = findViewById(R.id.topContainer)
+        bottomContainer = findViewById(R.id.bottomContainer)
+        navBarSpacer = findViewById(R.id.navBarSpacer)
         searchInput = findViewById(R.id.searchInput)
         searchResults = findViewById(R.id.searchResults)
         maneuverBanner = findViewById(R.id.maneuverBanner)
@@ -153,6 +202,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         maneuverText = findViewById(R.id.maneuverText)
         alertBanner = findViewById(R.id.alertBanner)
         speedText = findViewById(R.id.speedText)
+        btnTraffic = findViewById(R.id.btnTraffic)
         routePanel = findViewById(R.id.routePanel)
         routeTitle = findViewById(R.id.routeTitle)
         routeSummary = findViewById(R.id.routeSummary)
@@ -169,6 +219,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             } else false
         }
         findViewById<View>(R.id.searchButton).setOnClickListener { runSearch() }
+        findViewById<View>(R.id.btnMenu).setOnClickListener { showMainMenu() }
         searchResults.setOnItemClickListener { _, _, position, _ ->
             searchPlaces.getOrNull(position)?.let {
                 hideSearchResults()
@@ -177,10 +228,53 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         }
         findViewById<View>(R.id.btnRecenter).setOnClickListener { recenter() }
         findViewById<View>(R.id.btnReport).setOnClickListener { showReportDialog() }
+        btnTraffic.setOnClickListener { toggleTraffic() }
         findViewById<View>(R.id.btnStart).setOnClickListener { startNavigation() }
         findViewById<View>(R.id.btnCancel).setOnClickListener { clearRoute() }
         findViewById<View>(R.id.btnStop).setOnClickListener { stopNavigation() }
         findViewById<View>(R.id.btnWaze).setOnClickListener { openInWaze() }
+    }
+
+    // ---------- Affichage plein écran : on décale l'interface sous les barres Android ----------
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    @Suppress("DEPRECATION")
+    private fun setupEdgeToEdge() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false)
+        } else {
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+        }
+        findViewById<View>(R.id.root).setOnApplyWindowInsetsListener { _, insets ->
+            if (Build.VERSION.SDK_INT >= 30) {
+                val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+                insetTop = bars.top
+                insetBottom = bars.bottom
+            } else {
+                insetTop = insets.systemWindowInsetTop
+                insetBottom = insets.systemWindowInsetBottom
+            }
+            topContainer.setPadding(dp(12), dp(12) + insetTop, dp(12), dp(12))
+            navBarSpacer.layoutParams = navBarSpacer.layoutParams.also { it.height = insetBottom }
+            applyMapMargins()
+            insets
+        }
+        updateBottomSpacer()
+    }
+
+    private fun applyMapMargins() {
+        val m = map ?: return
+        m.uiSettings.setCompassMargins(0, insetTop + dp(76), dp(16), 0)
+        m.uiSettings.setAttributionMargins(dp(8), 0, 0, insetBottom + dp(4))
+    }
+
+    /** Sous un panneau, la barre de navigation garde le fond blanc du panneau. */
+    private fun updateBottomSpacer() {
+        val panelVisible = routePanel.visibility == View.VISIBLE || navPanel.visibility == View.VISIBLE
+        navBarSpacer.setBackgroundColor(if (panelVisible) Color.WHITE else Color.TRANSPARENT)
     }
 
     // ---------- Carte ----------
@@ -212,17 +306,22 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
                 PropertyFactory.circleStrokeWidth(3f),
             )
         )
-        s.addSource(GeoJsonSource("alerts-src"))
+        addPointLayers(s, "alerts", 7f)
+        addPointLayers(s, "pois", 9f)
+    }
+
+    private fun addPointLayers(s: Style, name: String, radius: Float) {
+        s.addSource(GeoJsonSource("$name-src"))
         s.addLayer(
-            CircleLayer("alerts-layer", "alerts-src").withProperties(
+            CircleLayer("$name-layer", "$name-src").withProperties(
                 PropertyFactory.circleColor(Expression.get("color")),
-                PropertyFactory.circleRadius(8f),
+                PropertyFactory.circleRadius(radius),
                 PropertyFactory.circleStrokeColor("#FFFFFF"),
                 PropertyFactory.circleStrokeWidth(2f),
             )
         )
         s.addLayer(
-            SymbolLayer("alerts-labels", "alerts-src").withProperties(
+            SymbolLayer("$name-labels", "$name-src").withProperties(
                 PropertyFactory.textField(Expression.get("label")),
                 PropertyFactory.textFont(arrayOf("Noto Sans Regular")),
                 PropertyFactory.textSize(12f),
@@ -252,7 +351,19 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         else src.setGeoJson(Feature.fromGeometry(Point.fromLngLat(p.lon, p.lat)))
     }
 
-    private fun allAlerts(): List<Alert> = cameras + alertStore.all()
+    /** Toutes les alertes connues : radars (Lufop sinon OSM), bornes, incidents TomTom, signalements perso. */
+    private fun allAlerts(): List<Alert> {
+        val lufop = lufopStore.all()
+        val osm = osmAlerts.filter { it.type == AlertType.BORNE || lufop.isEmpty() }
+        return (lufop + osm + incidents.values + alertStore.all())
+            .filter { it.type != AlertType.BORNE || settings.showChargers }
+    }
+
+    private fun isAnnounced(a: Alert): Boolean {
+        if (!a.type.announce) return false
+        val radar = a.type == AlertType.RADAR_FIXE || a.type == AlertType.RADAR_FEU || a.type == AlertType.RADAR_MOBILE
+        return !radar || settings.announceRadars
+    }
 
     private fun refreshAlertLayer() {
         val src = style?.getSourceAs<GeoJsonSource>("alerts-src") ?: return
@@ -260,9 +371,167 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             Feature.fromGeometry(Point.fromLngLat(a.lon, a.lat)).also {
                 it.addStringProperty("color", a.type.color)
                 it.addStringProperty("label", a.title)
+                it.addStringProperty("id", a.id)
             }
         }
         src.setGeoJson(FeatureCollection.fromFeatures(features))
+    }
+
+    private fun refreshPoiLayer() {
+        val src = style?.getSourceAs<GeoJsonSource>("pois-src") ?: return
+        val features = poiStore.all().map { p ->
+            Feature.fromGeometry(Point.fromLngLat(p.lon, p.lat)).also {
+                it.addStringProperty("color", p.category.color)
+                it.addStringProperty("label", p.name)
+                it.addStringProperty("id", p.id)
+            }
+        }
+        src.setGeoJson(FeatureCollection.fromFeatures(features))
+    }
+
+    /** Appui sur un POI ou une alerte de la carte : on affiche sa fiche. */
+    private fun handleMapTap(latLng: LatLng): Boolean {
+        val m = map ?: return false
+        val point = m.projection.toScreenLocation(latLng)
+        val hit = m.queryRenderedFeatures(point, "pois-layer", "alerts-layer").firstOrNull() ?: return false
+        val id = if (hit.hasProperty("id")) hit.getStringProperty("id") else return false
+        poiStore.all().firstOrNull { it.id == id }?.let { showPoiActions(it); return true }
+        allAlerts().firstOrNull { it.id == id }?.let { showAlertDetails(it); return true }
+        return false
+    }
+
+    private fun showAlertDetails(a: Alert) {
+        val source = when (a.source) {
+            "lufop" -> "Lufop"
+            "osm" -> "OpenStreetMap"
+            "tomtom" -> "Trafic TomTom"
+            else -> "Mon signalement"
+        }
+        val builder = AlertDialog.Builder(this)
+            .setTitle(a.title)
+            .setMessage(listOfNotNull(a.description, "Source : $source").joinToString("\n\n"))
+            .setPositiveButton("Fermer", null)
+        if (a.source == "moi") {
+            builder.setNegativeButton("Supprimer") { _, _ ->
+                alertStore.remove(a.id)
+                refreshAlertLayer()
+                computeRouteAlerts()
+            }
+        }
+        if (!navigating) {
+            builder.setNeutralButton("Y aller") { _, _ -> setDestination(Place(a.title, a.description ?: "", a.lat, a.lon)) }
+        }
+        builder.show()
+    }
+
+    // ---------- Trafic TomTom ----------
+
+    private fun updateTrafficButton() {
+        btnTraffic.alpha = if (settings.trafficOn && settings.hasTomTom) 1f else 0.45f
+    }
+
+    private fun toggleTraffic() {
+        if (!settings.hasTomTom) {
+            AlertDialog.Builder(this)
+                .setTitle("Trafic en temps réel")
+                .setMessage("Ajoutez votre clé TomTom gratuite dans les Réglages pour afficher le trafic et les incidents.")
+                .setPositiveButton("Réglages") { _, _ -> showSettings() }
+                .setNegativeButton("Plus tard", null)
+                .show()
+            return
+        }
+        settings.trafficOn = !settings.trafficOn
+        updateTrafficButton()
+        updateTrafficLayer()
+        if (settings.trafficOn) {
+            lastIncidentsAt = 0
+            periodicRefresh()
+        } else {
+            incidents = emptyMap()
+            refreshAlertLayer()
+            computeRouteAlerts()
+        }
+        toast(if (settings.trafficOn) "Trafic affiché" else "Trafic masqué")
+    }
+
+    private fun updateTrafficLayer() {
+        val s = style ?: return
+        s.removeLayer("traffic-layer")
+        s.removeSource("traffic-src")
+        if (!settings.trafficOn || !settings.hasTomTom) return
+        val tiles = TileSet("2.1.0", TomTom.flowTileUrl(settings.tomtomKey))
+        s.addSource(RasterSource("traffic-src", tiles, 256))
+        s.addLayerBelow(RasterLayer("traffic-layer", "traffic-src").withProperties(PropertyFactory.rasterOpacity(0.85f)), "route-casing")
+    }
+
+    private fun trafficActive() = settings.trafficOn && settings.hasTomTom
+
+    private fun loadIncidents(boxes: List<DoubleArray>) {
+        if (!trafficActive() || boxes.isEmpty()) return
+        lastIncidentsAt = System.currentTimeMillis()
+        val key = settings.tomtomKey
+        io.execute {
+            val found = ArrayList<Alert>()
+            var error: String? = null
+            for (b in boxes) {
+                try {
+                    found += TomTom.incidents(key, b[0], b[1], b[2], b[3])
+                } catch (e: Exception) {
+                    error = e.message
+                }
+            }
+            main.post {
+                incidents = incidents + found.associateBy { it.id }
+                refreshAlertLayer()
+                computeRouteAlerts()
+                if (error != null && found.isEmpty()) toast("Incidents TomTom indisponibles : $error")
+            }
+        }
+    }
+
+    private fun refreshEta(from: Location) {
+        val dest = destination ?: return
+        val r = route ?: return
+        if (!trafficActive()) return
+        lastEtaAt = System.currentTimeMillis()
+        val key = settings.tomtomKey
+        val remaining = if (navigating) (r.totalDistance - r.project(from.latitude, from.longitude, segmentHint).along) else r.totalDistance
+        io.execute {
+            try {
+                val eta = TomTom.eta(key, from.latitude, from.longitude, dest.lat, dest.lon)
+                main.post {
+                    if (route !== r) return@post
+                    etaSeconds = eta.travelTime
+                    etaDistance = remaining.coerceAtLeast(1.0)
+                    trafficDelay = eta.delay
+                    if (!navigating) showRouteSummary(r)
+                }
+            } catch (e: Exception) {
+                // on garde la durée Valhalla
+            }
+        }
+    }
+
+    /** Toutes les minutes : incidents et heure d'arrivée rafraîchis selon les besoins. */
+    private fun periodicRefresh() {
+        val loc = lastLocation ?: return
+        if (!trafficActive()) return
+        val now = System.currentTimeMillis()
+        val r = route
+        if (navigating && r != null) {
+            if (now - lastIncidentsAt > INCIDENTS_REFRESH_MS) {
+                val along = r.project(loc.latitude, loc.longitude, segmentHint).along
+                loadIncidents(TomTom.boxesAlong(r, along, along + 90_000, maxBoxes = 2))
+            }
+            if (now - lastEtaAt > ETA_REFRESH_MS) refreshEta(loc)
+        } else if (!navigating) {
+            val center = incidentsCenter
+            val moved = center == null || center.distanceTo(loc) > 15_000
+            if (moved || now - lastIncidentsAt > INCIDENTS_REFRESH_MS) {
+                incidentsCenter = loc
+                loadIncidents(listOf(doubleArrayOf(loc.latitude - 0.3, loc.longitude - 0.45, loc.latitude + 0.3, loc.longitude + 0.45)))
+            }
+        }
     }
 
     // ---------- Localisation ----------
@@ -335,7 +604,8 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         speedText.text = if (location.hasSpeed()) (location.speed * 3.6f).toInt().toString() else "0"
 
         if (navigating) updateNavigation(location) else checkFreeDriveAlerts(location)
-        maybeLoadCamerasAround(location)
+        maybeLoadOsmAround(location)
+        if (first) periodicRefresh()
     }
 
     override fun onProviderEnabled(provider: String) {}
@@ -362,31 +632,36 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         if (q.length < 2) return
         hideKeyboard()
         val loc = lastLocation
+        val pois = poiStore.search(q).map { it.toPlace() }
         io.execute {
-            try {
-                val places = Net.search(q, loc?.latitude, loc?.longitude)
-                main.post {
-                    searchPlaces = places
-                    if (places.isEmpty()) {
-                        toast("Aucun résultat")
-                        hideSearchResults()
-                    } else {
-                        searchResults.adapter = object : ArrayAdapter<Place>(this, android.R.layout.simple_list_item_2, android.R.id.text1, places) {
-                            override fun getView(position: Int, convertView: View?, parent: android.view.ViewGroup): View {
-                                val v = super.getView(position, convertView, parent)
-                                val p = places[position]
-                                v.findViewById<TextView>(android.R.id.text1).text = p.name
-                                v.findViewById<TextView>(android.R.id.text2).text = p.address
-                                return v
-                            }
-                        }
-                        searchResults.visibility = View.VISIBLE
-                    }
-                }
+            val online = try {
+                Net.search(q, loc?.latitude, loc?.longitude)
             } catch (e: Exception) {
-                main.post { toast("Recherche impossible : ${e.message}") }
+                main.post { if (pois.isEmpty()) toast("Recherche impossible : ${e.message}") }
+                emptyList()
+            }
+            val places = pois + online
+            main.post { showSearchResults(places) }
+        }
+    }
+
+    private fun showSearchResults(places: List<Place>) {
+        searchPlaces = places
+        if (places.isEmpty()) {
+            toast("Aucun résultat")
+            hideSearchResults()
+            return
+        }
+        searchResults.adapter = object : ArrayAdapter<Place>(this, android.R.layout.simple_list_item_2, android.R.id.text1, places) {
+            override fun getView(position: Int, convertView: View?, parent: android.view.ViewGroup): View {
+                val v = super.getView(position, convertView, parent)
+                val p = places[position]
+                v.findViewById<TextView>(android.R.id.text1).text = p.name
+                v.findViewById<TextView>(android.R.id.text2).text = p.address
+                return v
             }
         }
+        searchResults.visibility = View.VISIBLE
     }
 
     private fun hideSearchResults() {
@@ -407,6 +682,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         routeSummary.text = "Calcul de l'itinéraire…"
         routeDetails.text = place.address
         routePanel.visibility = View.VISIBLE
+        updateBottomSpacer()
         computeRoute(loc, place, isReroute = false)
     }
 
@@ -417,13 +693,16 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             try {
                 val r = Net.route(from.latitude, from.longitude, to.lat, to.lon, heading)
                 main.post { onRouteReady(r, isReroute) }
-                loadCamerasForRoute(r)
+                loadOsmForRoute(r)
             } catch (e: Exception) {
                 main.post {
                     rerouting = false
-                    if (isReroute) toast("Recalcul impossible, nouvel essai bientôt")
-                    else routeSummary.text = "Itinéraire introuvable"
-                    if (!isReroute) routeDetails.text = e.message ?: ""
+                    if (isReroute) {
+                        toast("Recalcul impossible, nouvel essai bientôt")
+                    } else {
+                        routeSummary.text = "Itinéraire introuvable"
+                        routeDetails.text = e.message ?: ""
+                    }
                 }
             }
         }
@@ -435,23 +714,46 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         route = r
         segmentHint = 0
         offRouteCount = 0
+        etaSeconds = r.totalTime
+        etaDistance = r.totalDistance.coerceAtLeast(1.0)
+        trafficDelay = 0.0
         spoken.removeAll { it.startsWith("m-") }
         drawRoute(r)
         computeRouteAlerts()
+        lastLocation?.let { refreshEta(it) }
         if (isReroute) {
             say("Nouvel itinéraire")
+            if (trafficActive()) loadIncidents(TomTom.boxesAlong(r, 0.0, 90_000.0, maxBoxes = 2))
             return
         }
-        val arrival = SimpleDateFormat("HH:mm", Locale.FRANCE).format(Date(System.currentTimeMillis() + (r.totalTime * 1000).toLong()))
-        routeSummary.text = "${Geo.formatDuration(r.totalTime)} (${Geo.formatDistance(r.totalDistance)})"
-        routeDetails.text = "Arrivée vers $arrival"
+        if (trafficActive()) loadIncidents(TomTom.boxesAlong(r))
+        showRouteSummary(r)
+        routePanel.post { fitRoute(r) }
+    }
+
+    private fun showRouteSummary(r: Route) {
+        val arrival = SimpleDateFormat("HH:mm", Locale.FRANCE).format(Date(System.currentTimeMillis() + (etaSeconds * 1000).toLong()))
+        routeSummary.text = "${Geo.formatDuration(etaSeconds)} (${Geo.formatDistance(r.totalDistance)})"
+        val traffic = when {
+            !trafficActive() -> ""
+            trafficDelay >= 60 -> " · dont ${Geo.formatDuration(trafficDelay)} de bouchons"
+            else -> " · trafic fluide"
+        }
+        routeDetails.text = "Arrivée vers $arrival$traffic"
+    }
+
+    private fun fitRoute(r: Route) {
         val bounds = LatLngBounds.Builder()
         val step = (r.points.size / 200).coerceAtLeast(1)
         r.points.filterIndexed { i, _ -> i % step == 0 || i == r.points.size - 1 }
             .forEach { bounds.include(LatLng(it[0], it[1])) }
         lastLocation?.let { bounds.include(LatLng(it.latitude, it.longitude)) }
         try {
-            map?.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds.build(), 120))
+            map?.animateCamera(
+                CameraUpdateFactory.newLatLngBounds(
+                    bounds.build(), dp(48), topContainer.height + dp(16), dp(48), bottomContainer.height + dp(16)
+                )
+            )
         } catch (e: Exception) {
             // itinéraire trop court pour former un rectangle
         }
@@ -465,6 +767,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         drawRoute(null)
         drawDestination(null)
         routePanel.visibility = View.GONE
+        updateBottomSpacer()
     }
 
     private fun openInWaze() {
@@ -489,6 +792,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         maneuverBanner.visibility = View.VISIBLE
         findViewById<View>(R.id.searchBar).visibility = View.GONE
         hideSearchResults()
+        updateBottomSpacer()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (locationReady) {
             m.locationComponent.renderMode = RenderMode.GPS
@@ -508,7 +812,11 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         navPanel.visibility = View.GONE
         alertBanner.visibility = View.GONE
         findViewById<View>(R.id.searchBar).visibility = View.VISIBLE
-        if (route != null) routePanel.visibility = View.VISIBLE
+        route?.let {
+            routePanel.visibility = View.VISIBLE
+            showRouteSummary(it)
+        }
+        updateBottomSpacer()
         map?.let { m ->
             if (locationReady) {
                 m.locationComponent.cameraMode = CameraMode.NONE
@@ -559,11 +867,12 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             }
         }
 
-        // Durée restante estimée au prorata de l'itinéraire
-        val remainingTime = if (r.totalDistance > 0) r.totalTime * remaining / r.totalDistance else 0.0
+        // Durée restante : référence (trafic compris si dispo) au prorata de la distance
+        val remainingTime = etaSeconds * remaining / etaDistance
         val arrival = SimpleDateFormat("HH:mm", Locale.FRANCE).format(Date(System.currentTimeMillis() + (remainingTime * 1000).toLong()))
         navEta.text = "$arrival · ${Geo.formatDuration(remainingTime)}"
-        navRemaining.text = "${Geo.formatDistance(remaining)} restants"
+        val traffic = if (trafficActive() && trafficDelay >= 60) " · bouchons +${Geo.formatDuration(trafficDelay)}" else ""
+        navRemaining.text = "${Geo.formatDistance(remaining)} restants$traffic"
 
         // Alertes devant soi sur l'itinéraire
         val ahead = routeAlerts
@@ -573,12 +882,13 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         showAlert(ahead?.first, ahead?.second)
     }
 
+    /** Place les alertes sur l'itinéraire (en arrière-plan : il peut y en avoir des milliers). */
     private fun computeRouteAlerts() {
         val r = route ?: run { routeAlerts = emptyList(); return }
-        val alerts = allAlerts()
-        routeAlerts = alerts.mapNotNull { a ->
-            val p = r.project(a.lat, a.lon, 0)
-            if (p.offRoute < 40) a to p.along else null
+        val alerts = allAlerts().filter { isAnnounced(it) }
+        io.execute {
+            val placed = alerts.mapNotNull { a -> r.projectNear(a.lat, a.lon, 40.0)?.let { a to it.along } }
+            main.post { if (route === r) routeAlerts = placed }
         }
     }
 
@@ -589,7 +899,9 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             showAlert(null, null)
             return
         }
+        val dLat = 0.006
         val candidate = allAlerts()
+            .filter { Math.abs(it.lat - loc.latitude) < dLat && Math.abs(it.lon - loc.longitude) < dLat * 1.6 && isAnnounced(it) }
             .map { it to Geo.distance(loc.latitude, loc.longitude, it.lat, it.lon) }
             .filter { (a, d) ->
                 d < FREE_DRIVE_ALERT_METERS && (!loc.hasBearing() ||
@@ -605,68 +917,309 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             return
         }
         alertBanner.text = "⚠  ${alert.title} dans ${Geo.formatDistance(distance.coerceAtLeast(0.0))}"
+        alertBanner.setBackgroundResource(R.drawable.bg_alert)
+        alertBanner.background.mutate().setTint(Color.parseColor(alert.type.color))
         alertBanner.visibility = View.VISIBLE
         if (spoken.add("a-${alert.id}")) {
-            val limit = if (alert.detail != null) ", limité à ${alert.detail}" else ""
-            say("${alert.type.spoken} dans ${Geo.spokenDistance(distance.coerceAtLeast(50.0))}$limit")
+            val limit = if (alert.detail != null && alert.type != AlertType.BOUCHON) ", limité à ${alert.detail}" else ""
+            val length = if (alert.type == AlertType.BOUCHON && alert.detail != null) " sur ${alert.detail}" else ""
+            say("${alert.type.spoken}$length dans ${Geo.spokenDistance(distance.coerceAtLeast(50.0))}$limit")
         }
     }
 
-    // ---------- Radars et signalements ----------
+    // ---------- Radars, bornes et signalements ----------
 
-    private fun loadCamerasForRoute(r: Route) {
+    private fun loadOsmForRoute(r: Route) {
         if (r.points.isEmpty()) return
         val pad = 0.02
         val south = r.points.minOf { it[0] } - pad
         val north = r.points.maxOf { it[0] } + pad
         val west = r.points.minOf { it[1] } - pad
         val east = r.points.maxOf { it[1] } + pad
+        // Sans Lufop, on prend les radars OSM sur tout l'itinéraire ; les bornes seulement autour de l'arrivée.
         try {
-            val found = Net.speedCameras(south, west, north, east)
-            main.post {
-                cameras = (cameras + found).distinctBy { it.id }
-                refreshAlertLayer()
-                computeRouteAlerts()
+            val found = ArrayList<Alert>()
+            if (lufopStore.all().isEmpty()) found += Net.osmAlerts(south, west, north, east, chargers = false)
+            if (settings.showChargers) {
+                val end = r.points.last()
+                found += Net.osmAlerts(end[0] - 0.05, end[1] - 0.075, end[0] + 0.05, end[1] + 0.075, chargers = true)
+                    .filter { it.type == AlertType.BORNE }
             }
+            main.post { mergeOsm(found) }
         } catch (e: Exception) {
-            main.post { toast("Radars indisponibles pour cet itinéraire") }
+            main.post { toast("Radars OpenStreetMap indisponibles pour cet itinéraire") }
         }
     }
 
-    private fun maybeLoadCamerasAround(loc: Location) {
-        val center = camerasCenter
-        if (camerasLoading) return
+    private fun maybeLoadOsmAround(loc: Location) {
+        val center = osmCenter
+        if (osmLoading) return
         if (center != null && center.distanceTo(loc) < 5000) return
-        camerasLoading = true
-        camerasCenter = loc
+        osmLoading = true
+        osmCenter = loc
         val d = 0.1 // environ 10 km autour
+        val chargers = settings.showChargers
         io.execute {
             try {
-                val found = Net.speedCameras(loc.latitude - d, loc.longitude - d * 1.5, loc.latitude + d, loc.longitude + d * 1.5)
+                val found = Net.osmAlerts(loc.latitude - d, loc.longitude - d * 1.5, loc.latitude + d, loc.longitude + d * 1.5, chargers)
+                main.post { mergeOsm(found) }
+            } catch (e: Exception) {
+                main.post { osmCenter = null }
+            } finally {
+                main.post { osmLoading = false }
+            }
+        }
+    }
+
+    private fun mergeOsm(found: List<Alert>) {
+        osmAlerts = (osmAlerts + found).distinctBy { it.id }
+        refreshAlertLayer()
+        computeRouteAlerts()
+    }
+
+    private fun syncLufop(manual: Boolean, forceFull: Boolean = false) {
+        val key = settings.lufopKey
+        if (key.isBlank()) return
+        if (manual) toast("Mise à jour des radars Lufop…")
+        io.execute {
+            try {
+                val result = lufopStore.sync(key, forceFull)
                 main.post {
-                    cameras = (cameras + found).distinctBy { it.id }
                     refreshAlertLayer()
                     computeRouteAlerts()
+                    when {
+                        result.full -> toast("Lufop : ${result.total} radars chargés")
+                        result.added.isNotEmpty() -> toast("Lufop : ${result.added.size} nouveautés radar (menu ☰)")
+                        manual -> toast("Lufop : aucune nouveauté")
+                    }
                 }
             } catch (e: Exception) {
-                camerasCenter = null
-            } finally {
-                main.post { camerasLoading = false }
+                main.post {
+                    if (manual) {
+                        AlertDialog.Builder(this)
+                            .setTitle("Erreur Lufop")
+                            .setMessage(e.message ?: e.toString())
+                            .setPositiveButton("OK", null)
+                            .show()
+                    } else {
+                        toast("Lufop indisponible : ${e.message?.take(80)}")
+                    }
+                }
             }
         }
     }
 
     private fun showReportDialog() {
         val loc = lastLocation ?: run { toast("Position GPS pas encore disponible"); return }
+        showReportDialogAt(loc.latitude, loc.longitude)
+    }
+
+    private fun showReportDialogAt(lat: Double, lon: Double) {
         val types = AlertType.reportable
         AlertDialog.Builder(this)
             .setTitle("Que voulez-vous signaler ?")
             .setItems(types.map { it.label }.toTypedArray()) { _, which ->
-                val alert = alertStore.add(types[which], loc.latitude, loc.longitude)
+                val alert = alertStore.add(types[which], lat, lon)
                 spoken.add("a-${alert.id}") // pas d'annonce pour sa propre alerte
                 refreshAlertLayer()
                 computeRouteAlerts()
                 toast("${alert.type.label} signalé")
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    // ---------- POIs ----------
+
+    private fun showLongPressMenu(lat: Double, lon: Double) {
+        AlertDialog.Builder(this)
+            .setItems(arrayOf("Itinéraire vers ce point", "Ajouter un POI ici", "Signaler ici")) { _, which ->
+                when (which) {
+                    0 -> setDestination(Place("Point sur la carte", String.format(Locale.FRANCE, "%.5f, %.5f", lat, lon), lat, lon))
+                    1 -> showAddPoiDialog(lat, lon)
+                    2 -> showReportDialogAt(lat, lon)
+                }
+            }
+            .show()
+    }
+
+    private fun showAddPoiDialog(lat: Double, lon: Double) {
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), 0)
+        }
+        val name = EditText(this).apply {
+            hint = "Nom du POI"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        }
+        val categories = PoiCategory.entries
+        val spinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, categories.map { it.label })
+        }
+        layout.addView(name)
+        layout.addView(spinner)
+        // Nom proposé d'après l'adresse, modifiable
+        io.execute {
+            val suggestion = try { Net.reverse(lat, lon) } catch (e: Exception) { null }
+            if (suggestion != null) main.post { if (name.text.isEmpty()) name.setText(suggestion) }
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Nouveau POI")
+            .setView(layout)
+            .setPositiveButton("Enregistrer") { _, _ ->
+                val label = name.text.toString().trim().ifBlank { categories[spinner.selectedItemPosition].label }
+                poiStore.add(label, categories[spinner.selectedItemPosition], lat, lon)
+                refreshPoiLayer()
+                toast("POI « $label » ajouté")
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    private fun showPoiList() {
+        val loc = lastLocation
+        val pois = poiStore.all().sortedBy { p -> loc?.let { Geo.distance(it.latitude, it.longitude, p.lat, p.lon) } ?: 0.0 }
+        if (pois.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle("Mes POIs")
+                .setMessage("Aucun POI pour l'instant. Faites un appui long sur la carte, ou utilisez « Ajouter ma position en POI ».")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        val labels = pois.map { p ->
+            val dist = loc?.let { " · " + Geo.formatDistance(Geo.distance(it.latitude, it.longitude, p.lat, p.lon)) } ?: ""
+            "${p.name}\n${p.category.label}$dist"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Mes POIs")
+            .setItems(labels.toTypedArray()) { _, which -> showPoiActions(pois[which]) }
+            .setNegativeButton("Fermer", null)
+            .show()
+    }
+
+    private fun showPoiActions(p: Poi) {
+        AlertDialog.Builder(this)
+            .setTitle(p.name)
+            .setItems(arrayOf("Y aller", "Voir sur la carte", "Supprimer")) { _, which ->
+                when (which) {
+                    0 -> if (!navigating) setDestination(p.toPlace()) else toast("Arrêtez d'abord le guidage")
+                    1 -> map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(p.lat, p.lon), 16.0))
+                    2 -> {
+                        poiStore.remove(p.id)
+                        refreshPoiLayer()
+                        toast("POI supprimé")
+                    }
+                }
+            }
+            .show()
+    }
+
+    // ---------- Menu et réglages ----------
+
+    private fun showMainMenu() {
+        AlertDialog.Builder(this)
+            .setItems(arrayOf("Mes POIs", "Ajouter ma position en POI", "Nouveautés radars Lufop", "Réglages")) { _, which ->
+                when (which) {
+                    0 -> showPoiList()
+                    1 -> lastLocation?.let { showAddPoiDialog(it.latitude, it.longitude) } ?: toast("Position GPS pas encore disponible")
+                    2 -> showLufopNews()
+                    3 -> showSettings()
+                }
+            }
+            .show()
+    }
+
+    private fun showLufopNews() {
+        if (!settings.hasLufop) {
+            toast("Ajoutez d'abord votre clé Lufop dans les Réglages")
+            return
+        }
+        val recent = lufopStore.recent()
+        val sync = lufopStore.lastSync?.let { "Dernière mise à jour : $it" } ?: "Jamais mis à jour"
+        if (recent.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle("Nouveautés radars")
+                .setMessage("Aucune nouveauté lors de la dernière mise à jour.\n\n$sync\n${lufopStore.all().size} radars en mémoire.")
+                .setPositiveButton("OK", null)
+                .setNeutralButton("Mettre à jour") { _, _ -> syncLufop(manual = true) }
+                .show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Nouveautés radars (${recent.size})")
+            .setItems(recent.map { "${it.title}\n${it.description ?: ""}" }.toTypedArray()) { _, which ->
+                val a = recent[which]
+                map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(a.lat, a.lon), 16.0))
+            }
+            .setPositiveButton("Fermer", null)
+            .show()
+    }
+
+    private fun showSettings() {
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), 0)
+        }
+        fun label(text: String) = TextView(this).apply {
+            this.text = text
+            setPadding(0, dp(12), 0, 0)
+            setTextColor(Color.parseColor("#5F6368"))
+        }
+        val tomtom = EditText(this).apply {
+            setText(settings.tomtomKey)
+            hint = "Clé API TomTom"
+            isSingleLine = true
+        }
+        val lufop = EditText(this).apply {
+            setText(settings.lufopKey)
+            hint = "Clé API Lufop"
+            isSingleLine = true
+        }
+        val chargers = CheckBox(this).apply {
+            text = "Afficher les bornes de recharge"
+            isChecked = settings.showChargers
+        }
+        val radars = CheckBox(this).apply {
+            text = "Annoncer les radars"
+            isChecked = settings.announceRadars
+        }
+        val lufopInfo = lufopStore.lastSync?.let { "Lufop : ${lufopStore.all().size} radars, mis à jour le $it" }
+            ?: "Lufop : pas encore téléchargé"
+        layout.addView(label("Trafic en temps réel (developer.tomtom.com)"))
+        layout.addView(tomtom)
+        layout.addView(label("Radars Lufop (api.lufop.net)"))
+        layout.addView(lufop)
+        layout.addView(label(lufopInfo))
+        layout.addView(chargers)
+        layout.addView(radars)
+
+        fun save(): Boolean {
+            val lufopChanged = lufop.text.toString().trim() != settings.lufopKey
+            settings.tomtomKey = tomtom.text.toString()
+            settings.lufopKey = lufop.text.toString()
+            settings.showChargers = chargers.isChecked
+            settings.announceRadars = radars.isChecked
+            updateTrafficButton()
+            updateTrafficLayer()
+            osmCenter = null
+            lastLocation?.let { maybeLoadOsmAround(it) }
+            lastIncidentsAt = 0
+            periodicRefresh()
+            refreshAlertLayer()
+            computeRouteAlerts()
+            return lufopChanged
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Réglages")
+            .setView(layout)
+            .setPositiveButton("Enregistrer") { _, _ ->
+                if (save() && settings.hasLufop) syncLufop(manual = true, forceFull = true)
+            }
+            .setNeutralButton("Mettre à jour Lufop") { _, _ ->
+                save()
+                if (settings.hasLufop) syncLufop(manual = true) else toast("Clé Lufop manquante")
             }
             .setNegativeButton("Annuler", null)
             .show()
@@ -715,6 +1268,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     }
 
     override fun onDestroy() {
+        main.removeCallbacks(ticker)
         (getSystemService(Context.LOCATION_SERVICE) as LocationManager).removeUpdates(this)
         tts?.shutdown()
         io.shutdownNow()

@@ -5,15 +5,27 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 
-/** Types d'alertes façon Waze. ttlMinutes = 0 : alerte permanente. */
-enum class AlertType(val label: String, val spoken: String, val color: String, val ttlMinutes: Long) {
-    RADAR_FIXE("Radar fixe", "Radar", "#D93025", 0),
-    RADAR_MOBILE("Radar mobile", "Radar mobile signalé", "#F29900", 240),
+/**
+ * Types d'alertes façon Waze. ttlMinutes = 0 : pas d'expiration pour un signalement.
+ * announce = false : affiché sur la carte sans annonce vocale.
+ */
+enum class AlertType(
+    val label: String,
+    val spoken: String,
+    val color: String,
+    val ttlMinutes: Long,
+    val announce: Boolean = true,
+) {
+    RADAR_FIXE("Radar", "Radar", "#D93025", 0),
+    RADAR_FEU("Radar feu rouge", "Radar feu rouge", "#A50E0E", 0),
+    RADAR_MOBILE("Radar mobile", "Zone de radar mobile", "#F29900", 240),
     POLICE("Police", "Police signalée", "#1A73E8", 120),
     ACCIDENT("Accident", "Accident signalé", "#B31412", 120),
     DANGER("Danger", "Danger signalé", "#F9AB00", 720),
-    TRAVAUX("Travaux", "Travaux signalés", "#E8710A", 1440),
-    BOUCHON("Bouchon", "Bouchon signalé", "#9334E6", 60);
+    TRAVAUX("Travaux", "Travaux", "#E8710A", 1440),
+    ROUTE_FERMEE("Route fermée", "Route fermée", "#5F6368", 0),
+    BOUCHON("Bouchon", "Bouchon", "#9334E6", 60),
+    BORNE("Borne", "", "#0F9D58", 0, announce = false);
 
     companion object {
         /** Types que l'utilisateur peut signaler lui-même. */
@@ -21,6 +33,7 @@ enum class AlertType(val label: String, val spoken: String, val color: String, v
     }
 }
 
+/** source : "moi" (signalement perso), "osm", "lufop" ou "tomtom". */
 data class Alert(
     val id: String,
     val type: AlertType,
@@ -28,8 +41,30 @@ data class Alert(
     val lon: Double,
     val createdAt: Long,
     val detail: String? = null,
+    val source: String = "moi",
+    val description: String? = null,
 ) {
     val title: String get() = if (detail != null) "${type.label} $detail" else type.label
+
+    fun toJson(): JSONObject = JSONObject()
+        .put("id", id).put("type", type.name).put("lat", lat).put("lon", lon).put("ts", createdAt)
+        .put("detail", detail ?: "").put("source", source).put("description", description ?: "")
+
+    companion object {
+        fun fromJson(o: JSONObject): Alert? {
+            val type = try { AlertType.valueOf(o.getString("type")) } catch (e: Exception) { return null }
+            return Alert(
+                id = o.getString("id"),
+                type = type,
+                lat = o.getDouble("lat"),
+                lon = o.getDouble("lon"),
+                createdAt = o.optLong("ts"),
+                detail = o.optString("detail").ifBlank { null },
+                source = o.optString("source", "moi"),
+                description = o.optString("description").ifBlank { null },
+            )
+        }
+    }
 }
 
 /** Signalements personnels, gardés sur le téléphone jusqu'à leur expiration. */
@@ -39,13 +74,12 @@ class AlertStore(context: Context) {
     fun all(): List<Alert> {
         val now = System.currentTimeMillis()
         val raw = prefs.getString("items", "[]") ?: "[]"
-        val list = ArrayList<Alert>()
         val array = try { JSONArray(raw) } catch (e: Exception) { JSONArray() }
+        val list = ArrayList<Alert>()
         for (i in 0 until array.length()) {
-            val o = array.optJSONObject(i) ?: continue
-            val type = try { AlertType.valueOf(o.getString("type")) } catch (e: Exception) { continue }
-            val alert = Alert(o.getString("id"), type, o.getDouble("lat"), o.getDouble("lon"), o.getLong("ts"))
-            if (type.ttlMinutes == 0L || now - alert.createdAt < type.ttlMinutes * 60_000) list.add(alert)
+            val alert = array.optJSONObject(i)?.let { Alert.fromJson(it) } ?: continue
+            val ttl = alert.type.ttlMinutes
+            if (ttl == 0L || now - alert.createdAt < ttl * 60_000) list.add(alert)
         }
         if (list.size != array.length()) save(list)
         return list
@@ -61,10 +95,7 @@ class AlertStore(context: Context) {
 
     private fun save(list: List<Alert>) {
         val array = JSONArray()
-        list.forEach {
-            array.put(JSONObject().put("id", it.id).put("type", it.type.name)
-                .put("lat", it.lat).put("lon", it.lon).put("ts", it.createdAt))
-        }
+        list.forEach { array.put(it.toJson()) }
         prefs.edit().putString("items", array.toString()).apply()
     }
 }

@@ -126,6 +126,10 @@ class Route(
     val maneuvers: List<Maneuver>,
     val totalTime: Double,
 ) {
+    private companion object {
+        const val GRID = 0.01
+    }
+
     val cumulative = DoubleArray(points.size)
 
     init {
@@ -148,6 +152,45 @@ class Route(
         if (local.offRoute < 80) return local
         val full = projectRange(lat, lon, 0, points.size - 2)
         return if (full.offRoute < local.offRoute) full else local
+    }
+
+    /** Index spatial grossier (cases de ~1 km) des segments, pour placer vite des milliers d'alertes. */
+    private val grid: Map<Long, List<Int>> by lazy {
+        val map = HashMap<Long, MutableList<Int>>()
+        for (i in 0 until points.size - 1) {
+            val a = points[i]
+            val b = points[i + 1]
+            val cells = HashSet<Long>()
+            // Les longs segments (autoroutes) traversent plusieurs cases : on les échantillonne.
+            val steps = Math.ceil(maxOf(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1])) / (GRID / 2)).toInt().coerceAtLeast(1)
+            for (s in 0..steps) {
+                val f = s.toDouble() / steps
+                cells.add(cell(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f))
+            }
+            cells.forEach { map.getOrPut(it) { ArrayList() }.add(i) }
+        }
+        map
+    }
+
+    private fun cell(lat: Double, lon: Double): Long =
+        Math.floor(lat / GRID).toLong() * 1_000_000L + Math.floor(lon / GRID).toLong()
+
+    /** Position sur l'itinéraire d'un point situé à moins de ~maxDist mètres, sinon null. */
+    fun projectNear(lat: Double, lon: Double, maxDist: Double): Projection? {
+        if (points.size < 2) return null
+        val cy = Math.floor(lat / GRID).toLong()
+        val cx = Math.floor(lon / GRID).toLong()
+        var best: Projection? = null
+        for (dy in -1L..1L) for (dx in -1L..1L) {
+            val segs = grid[(cy + dy) * 1_000_000L + (cx + dx)] ?: continue
+            for (i in segs) {
+                val (t, d) = Geo.projectOnSegment(lat, lon, points[i], points[i + 1])
+                if (d <= maxDist && (best == null || d < best.offRoute)) {
+                    best = Projection(i, cumulative[i] + t * (cumulative[i + 1] - cumulative[i]), d)
+                }
+            }
+        }
+        return best
     }
 
     private fun projectRange(lat: Double, lon: Double, from: Int, to: Int): Projection {

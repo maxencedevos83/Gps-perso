@@ -12,17 +12,26 @@ L'APK est compilée automatiquement par GitHub Actions à chaque modification de
 
 ## Fonctions
 
-- Carte OpenStreetMap (tuiles OpenFreeMap, gratuites, sans clé).
-- Recherche d'adresse (Photon) ou appui long sur la carte pour choisir une destination.
+- Carte OpenStreetMap (tuiles OpenFreeMap, gratuites, sans clé), affichage plein écran.
+- Recherche d'adresse (Photon) et de POIs perso, ou appui long sur la carte.
 - Itinéraire voiture (Valhalla), durée, distance et heure d'arrivée.
 - Guidage vocal en français, bandeau de manœuvre, recalcul automatique en cas d'écart.
-- Radars fixes issus d'OpenStreetMap, annoncés à l'approche (avec ou sans itinéraire).
-- Bouton ⚠ pour signaler police, radar mobile, accident, danger, travaux, bouchon (gardés sur le téléphone, expirent automatiquement).
+- Trafic en temps réel TomTom (bouton 🚦) : couleurs de fluidité, incidents annoncés (accidents, bouchons, travaux, routes fermées) et heure d'arrivée corrigée par les bouchons.
+- Radars : base Lufop (téléchargée une fois puis nouveautés chaque jour) ou, à défaut, radars OpenStreetMap.
+- Bornes de recharge OpenStreetMap autour de soi et de la destination.
+- POIs perso : appui long sur la carte ou menu ☰ › Ajouter ma position, avec catégorie.
+- Bouton ⚠ pour signaler police, radar mobile, accident, danger, travaux, bouchon.
 - Bouton « Waze » pour ouvrir la même destination dans Waze.
+
+## Clés gratuites (menu ☰ › Réglages)
+
+- **TomTom** (trafic) : compte sur https://developer.tomtom.com, puis copier la clé API.
+- **Lufop** (radars) : formulaire sur https://api.lufop.net/#apiAccessForm.
 
 ## Limites connues
 
-- Pas encore de trafic en temps réel (prévu via l'offre gratuite TomTom).
-- Les signalements ne sont visibles que sur ce téléphone.
+- Pas de TMC : les téléphones Android n'ont pas accès au signal RDS-TMC de la radio FM.
+- Les alertes Waze ne sont pas accessibles (aucune API publique).
+- Les signalements perso ne sont visibles que sur ce téléphone.
 - Le guidage s'arrête si l'appli passe en arrière-plan trop longtemps (garder l'écran allumé).
 - Serveurs publics gratuits : usage personnel modéré uniquement.
