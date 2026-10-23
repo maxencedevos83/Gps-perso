@@ -30,6 +30,7 @@ import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
@@ -38,6 +39,7 @@ import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.geometry.LatLngBounds
 import org.maplibre.android.location.LocationComponentActivationOptions
+import org.maplibre.android.location.LocationComponentOptions
 import org.maplibre.android.location.modes.CameraMode
 import org.maplibre.android.location.modes.RenderMode
 import org.maplibre.android.maps.MapLibreMap
@@ -67,6 +69,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     companion object {
         private const val STYLE_URL = "https://tiles.openfreemap.org/styles/liberty"
         private const val REQ_LOCATION = 1
+        private const val REQ_CALENDAR = 2
         private const val OFF_ROUTE_METERS = 50.0
         private const val ALERT_AHEAD_METERS = 800.0
         private const val FREE_DRIVE_ALERT_METERS = 500.0
@@ -91,6 +94,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     private lateinit var alertBanner: TextView
     private lateinit var speedText: TextView
     private lateinit var btnTraffic: TextView
+    private lateinit var agendaChip: TextView
     private lateinit var routePanel: View
     private lateinit var routeTitle: TextView
     private lateinit var routeSummary: TextView
@@ -135,6 +139,15 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     private var incidents: Map<String, Alert> = emptyMap()
     private var lastIncidentsAt = 0L
     private var incidentsCenter: Location? = null
+    /** McDonald's et Burger King connus (autour de soi et le long du trajet). */
+    private var brandPlaces: Map<String, NearbyPlace> = emptyMap()
+    private var brandsCenter: Location? = null
+    /** Derniers résultats « à proximité » affichés sur la carte. */
+    private var nearbyShown: List<NearbyPlace> = emptyList()
+    /** Étape facultative (station, resto) avant la destination. */
+    private var stop: Place? = null
+    private var agendaEvents: List<AgendaEvent> = emptyList()
+
     /** Alertes situées sur l'itinéraire, avec leur position (m) depuis le départ. */
     private var routeAlerts: List<Pair<Alert, Double>> = emptyList()
 
@@ -170,6 +183,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
                 enableLocation()
                 refreshAlertLayer()
                 refreshPoiLayer()
+                refreshBrandLayer()
             }
             m.addOnMapLongClickListener { latLng ->
                 if (!navigating) showLongPressMenu(latLng.latitude, latLng.longitude)
@@ -203,6 +217,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         alertBanner = findViewById(R.id.alertBanner)
         speedText = findViewById(R.id.speedText)
         btnTraffic = findViewById(R.id.btnTraffic)
+        agendaChip = findViewById(R.id.agendaChip)
         routePanel = findViewById(R.id.routePanel)
         routeTitle = findViewById(R.id.routeTitle)
         routeSummary = findViewById(R.id.routeSummary)
@@ -229,6 +244,8 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         findViewById<View>(R.id.btnRecenter).setOnClickListener { recenter() }
         findViewById<View>(R.id.btnReport).setOnClickListener { showReportDialog() }
         btnTraffic.setOnClickListener { toggleTraffic() }
+        findViewById<View>(R.id.btnFood).setOnClickListener { showFoodMenu() }
+        findViewById<View>(R.id.btnFuel).setOnClickListener { showStations() }
         findViewById<View>(R.id.btnStart).setOnClickListener { startNavigation() }
         findViewById<View>(R.id.btnCancel).setOnClickListener { clearRoute() }
         findViewById<View>(R.id.btnStop).setOnClickListener { stopNavigation() }
@@ -306,8 +323,62 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
                 PropertyFactory.circleStrokeWidth(3f),
             )
         )
+        addPointLayers(s, "nearby", 7f)
         addPointLayers(s, "alerts", 7f)
         addPointLayers(s, "pois", 9f)
+        // McDonald's / Burger King bien visibles : gros rond aux couleurs de l'enseigne
+        s.addSource(GeoJsonSource("brands-src"))
+        s.addLayer(
+            CircleLayer("brands-layer", "brands-src").withProperties(
+                PropertyFactory.circleColor(Expression.get("color")),
+                PropertyFactory.circleRadius(12f),
+                PropertyFactory.circleStrokeColor(Expression.get("stroke")),
+                PropertyFactory.circleStrokeWidth(3f),
+            )
+        )
+        s.addLayer(
+            SymbolLayer("brands-labels", "brands-src").withProperties(
+                PropertyFactory.textField(Expression.get("label")),
+                PropertyFactory.textFont(arrayOf("Noto Sans Bold")),
+                PropertyFactory.textSize(13f),
+                PropertyFactory.textOffset(arrayOf(0f, 1.4f)),
+                PropertyFactory.textAnchor(Property.TEXT_ANCHOR_TOP),
+                PropertyFactory.textColor(Expression.get("stroke")),
+                PropertyFactory.textHaloColor("#FFFFFF"),
+                PropertyFactory.textHaloWidth(2f),
+                PropertyFactory.textAllowOverlap(true),
+                PropertyFactory.iconAllowOverlap(true),
+            )
+        )
+    }
+
+    private fun refreshBrandLayer() {
+        val src = style?.getSourceAs<GeoJsonSource>("brands-src") ?: return
+        val features = if (!settings.showBrands) emptyList() else brandPlaces.values.map { b ->
+            Feature.fromGeometry(Point.fromLngLat(b.lon, b.lat)).also {
+                val mcdo = b.brand == "mcdo"
+                it.addStringProperty("color", if (mcdo) "#FFC72C" else "#F5EBDC")
+                it.addStringProperty("stroke", if (mcdo) "#DA291C" else "#D62300")
+                it.addStringProperty("label", if (mcdo) "McDo" else "BK")
+                it.addStringProperty("id", b.id)
+            }
+        }
+        src.setGeoJson(FeatureCollection.fromFeatures(features))
+    }
+
+    private fun refreshNearbyLayer() {
+        val src = style?.getSourceAs<GeoJsonSource>("nearby-src") ?: return
+        val features = nearbyShown.filter { it.brand == null || !settings.showBrands }.map { n ->
+            Feature.fromGeometry(Point.fromLngLat(n.lon, n.lat)).also {
+                it.addStringProperty("color", if (n.kind == NearbyKind.STATION) "#DB4437" else "#FF7043")
+                val label = if (n.kind == NearbyKind.STATION) {
+                    n.price?.let { p -> String.format(Locale.FRANCE, "%.3f €", p) } ?: "Station"
+                } else n.name
+                it.addStringProperty("label", label)
+                it.addStringProperty("id", n.id)
+            }
+        }
+        src.setGeoJson(FeatureCollection.fromFeatures(features))
     }
 
     private fun addPointLayers(s: Style, name: String, radius: Float) {
@@ -393,8 +464,9 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     private fun handleMapTap(latLng: LatLng): Boolean {
         val m = map ?: return false
         val point = m.projection.toScreenLocation(latLng)
-        val hit = m.queryRenderedFeatures(point, "pois-layer", "alerts-layer").firstOrNull() ?: return false
+        val hit = m.queryRenderedFeatures(point, "pois-layer", "brands-layer", "nearby-layer", "alerts-layer").firstOrNull() ?: return false
         val id = if (hit.hasProperty("id")) hit.getStringProperty("id") else return false
+        (brandPlaces[id] ?: nearbyShown.firstOrNull { it.id == id })?.let { showNearbyActions(it); return true }
         poiStore.all().firstOrNull { it.id == id }?.let { showPoiActions(it); return true }
         allAlerts().firstOrNull { it.id == id }?.let { showAlertDetails(it); return true }
         return false
@@ -495,10 +567,11 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         if (!trafficActive()) return
         lastEtaAt = System.currentTimeMillis()
         val key = settings.tomtomKey
+        val viaStop = stop
         val remaining = if (navigating) (r.totalDistance - r.project(from.latitude, from.longitude, segmentHint).along) else r.totalDistance
         io.execute {
             try {
-                val eta = TomTom.eta(key, from.latitude, from.longitude, dest.lat, dest.lon)
+                val eta = TomTom.eta(key, from.latitude, from.longitude, dest.lat, dest.lon, listOfNotNull(viaStop))
                 main.post {
                     if (route !== r) return@post
                     etaSeconds = eta.travelTime
@@ -539,9 +612,16 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     private fun hasLocationPermission() =
         checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
+    private fun hasCalendarPermission() =
+        checkSelfPermission(Manifest.permission.READ_CALENDAR) == PackageManager.PERMISSION_GRANTED
+
     private fun requestLocationPermission() {
+        val missing = ArrayList<String>()
         if (hasLocationPermission()) startLocationUpdates()
-        else requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION), REQ_LOCATION)
+        else missing += listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+        if (hasCalendarPermission()) refreshAgenda()
+        else missing += Manifest.permission.READ_CALENDAR
+        if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), REQ_LOCATION)
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -550,9 +630,14 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             if (hasLocationPermission()) {
                 startLocationUpdates()
                 enableLocation()
-            } else {
+            } else if (Manifest.permission.ACCESS_FINE_LOCATION in permissions) {
                 toast("Sans la localisation, le GPS ne peut pas vous guider.")
             }
+            if (hasCalendarPermission()) refreshAgenda()
+        }
+        if (requestCode == REQ_CALENDAR && hasCalendarPermission()) {
+            refreshAgenda()
+            showAgenda()
         }
     }
 
@@ -578,15 +663,51 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         if (locationReady || !hasLocationPermission()) return
         val lc = m.locationComponent
         lc.activateLocationComponent(
-            LocationComponentActivationOptions.Builder(this, s).useDefaultLocationEngine(false).build()
+            LocationComponentActivationOptions.Builder(this, s)
+                .useDefaultLocationEngine(false)
+                .locationComponentOptions(positionOptions())
+                .build()
         )
         lc.isLocationComponentEnabled = true
-        lc.renderMode = RenderMode.COMPASS
         locationReady = true
+        lc.renderMode = idleRenderMode()
         lastLocation?.let {
             lc.forceLocationUpdate(it)
             m.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(it.latitude, it.longitude), 14.0))
         }
+    }
+
+    private fun positionIconRes(): Int? = when (settings.positionIcon) {
+        "voiture_rouge" -> R.drawable.pos_car_red
+        "voiture_noire" -> R.drawable.pos_car_black
+        "voiture_bleue" -> R.drawable.pos_car_blue
+        "moto" -> R.drawable.pos_moto
+        "camion" -> R.drawable.pos_truck
+        else -> null
+    }
+
+    /** Icône de position : flèche bleue d'origine, ou véhicule qui tourne avec le cap. */
+    private fun positionOptions(): LocationComponentOptions {
+        val icon = positionIconRes() ?: return LocationComponentOptions.builder(this).build()
+        return LocationComponentOptions.builder(this)
+            .gpsDrawable(icon)
+            .foregroundDrawable(icon)
+            .foregroundDrawableStale(icon)
+            .backgroundDrawable(R.drawable.pos_none)
+            .backgroundDrawableStale(R.drawable.pos_none)
+            .bearingDrawable(R.drawable.pos_none)
+            .accuracyAlpha(0.1f)
+            .build()
+    }
+
+    /** Hors guidage : boussole pour la flèche, mode GPS (icône orientée selon le cap) pour un véhicule. */
+    private fun idleRenderMode() = if (positionIconRes() != null) RenderMode.GPS else RenderMode.COMPASS
+
+    private fun applyPositionIcon() {
+        val m = map ?: return
+        if (!locationReady) return
+        m.locationComponent.applyStyle(positionOptions())
+        m.locationComponent.renderMode = if (navigating) RenderMode.GPS else idleRenderMode()
     }
 
     override fun onLocationChanged(location: Location) {
@@ -605,6 +726,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
 
         if (navigating) updateNavigation(location) else checkFreeDriveAlerts(location)
         maybeLoadOsmAround(location)
+        maybeLoadBrandsAround(location)
         if (first) periodicRefresh()
     }
 
@@ -677,6 +799,8 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     private fun setDestination(place: Place) {
         val loc = lastLocation ?: run { toast("Position GPS pas encore disponible"); return }
         destination = place
+        stop = null
+        agendaChip.visibility = View.GONE
         drawDestination(place)
         routeTitle.text = place.name
         routeSummary.text = "Calcul de l'itinéraire…"
@@ -688,12 +812,14 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
 
     private fun computeRoute(from: Location, to: Place, isReroute: Boolean) {
         rerouting = true
+        val via = listOfNotNull(stop)
         val heading = if (from.hasBearing() && from.hasSpeed() && from.speed > 3) from.bearing else null
         io.execute {
             try {
-                val r = Net.route(from.latitude, from.longitude, to.lat, to.lon, heading)
+                val r = Net.route(from.latitude, from.longitude, to.lat, to.lon, heading, via)
                 main.post { onRouteReady(r, isReroute) }
                 loadOsmForRoute(r)
+                loadBrandsForRoute(r)
             } catch (e: Exception) {
                 main.post {
                     rerouting = false
@@ -763,11 +889,13 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         stopNavigation()
         route = null
         destination = null
+        stop = null
         routeAlerts = emptyList()
         drawRoute(null)
         drawDestination(null)
         routePanel.visibility = View.GONE
         updateBottomSpacer()
+        updateAgendaChip()
     }
 
     private fun openInWaze() {
@@ -820,7 +948,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         map?.let { m ->
             if (locationReady) {
                 m.locationComponent.cameraMode = CameraMode.NONE
-                m.locationComponent.renderMode = RenderMode.COMPASS
+                m.locationComponent.renderMode = idleRenderMode()
             }
             m.animateCamera(CameraUpdateFactory.tiltTo(0.0))
         }
@@ -838,6 +966,13 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         if (offRouteCount >= 3 && !rerouting && System.currentTimeMillis() - lastRerouteAt > 8000) {
             offRouteCount = 0
             computeRoute(loc, dest, isReroute = true)
+        }
+
+        stop?.let { st ->
+            if (Geo.distance(loc.latitude, loc.longitude, st.lat, st.lon) < 50) {
+                stop = null
+                say("Vous êtes arrivé à votre étape")
+            }
         }
 
         val remaining = (r.totalDistance - p.along).coerceAtLeast(0.0)
@@ -1115,16 +1250,293 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             .show()
     }
 
+    // ---------- Agenda ----------
+
+    private fun refreshAgenda() {
+        if (!hasCalendarPermission()) return
+        io.execute {
+            val events = try { Agenda.upcoming(this) } catch (e: Exception) { emptyList() }
+            main.post {
+                agendaEvents = events
+                updateAgendaChip()
+            }
+        }
+    }
+
+    /** Raccourci vers le prochain rendez-vous avec adresse (dans les 12 heures). */
+    private fun updateAgendaChip() {
+        val next = agendaEvents.firstOrNull {
+            !it.allDay && it.begin > System.currentTimeMillis() - 30 * 60_000 &&
+                it.begin < System.currentTimeMillis() + 12 * 60 * 60_000
+        }
+        if (next == null || navigating || route != null) {
+            agendaChip.visibility = View.GONE
+            return
+        }
+        agendaChip.text = "📅 ${next.whenLabel()} · ${next.title}  ›  Y aller"
+        agendaChip.setOnClickListener { goToAgendaEvent(next) }
+        agendaChip.visibility = View.VISIBLE
+    }
+
+    private fun showAgenda() {
+        if (!hasCalendarPermission()) {
+            requestPermissions(arrayOf(Manifest.permission.READ_CALENDAR), REQ_CALENDAR)
+            return
+        }
+        val events = try { Agenda.upcoming(this) } catch (e: Exception) { emptyList() }
+        agendaEvents = events
+        if (events.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle("Mon agenda")
+                .setMessage("Aucun rendez-vous avec une adresse dans les 7 prochains jours.\n\nAstuce : renseignez le champ « Lieu » de vos rendez-vous dans Google Agenda.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Mon agenda (7 jours)")
+            .setItems(events.map { "${it.whenLabel()} · ${it.title}\n${it.location}" }.toTypedArray()) { _, which ->
+                goToAgendaEvent(events[which])
+            }
+            .setNegativeButton("Fermer", null)
+            .show()
+    }
+
+    /** Cherche l'adresse du rendez-vous puis calcule l'itinéraire. */
+    private fun goToAgendaEvent(e: AgendaEvent) {
+        val loc = lastLocation
+        toast("Recherche de « ${e.location} »…")
+        io.execute {
+            val place = try { Net.search(e.location, loc?.latitude, loc?.longitude).firstOrNull() } catch (ex: Exception) { null }
+            main.post {
+                if (place == null) {
+                    toast("Adresse introuvable : ${e.location}")
+                    searchInput.setText(e.location)
+                } else {
+                    agendaChip.visibility = View.GONE
+                    setDestination(Place(e.title, "${e.whenLabel()} · ${e.location}", place.lat, place.lon))
+                }
+            }
+        }
+    }
+
+    // ---------- McDonald's, Burger King, restaurants, stations ----------
+
+    private fun maybeLoadBrandsAround(loc: Location) {
+        if (!settings.showBrands) return
+        val center = brandsCenter
+        if (center != null && center.distanceTo(loc) < 15_000) return
+        brandsCenter = loc
+        val d = 0.3
+        io.execute {
+            try {
+                val found = Nearby.brands(loc.latitude - d, loc.longitude - d * 1.5, loc.latitude + d, loc.longitude + d * 1.5)
+                main.post { mergeBrands(found) }
+            } catch (e: Exception) {
+                main.post { brandsCenter = null }
+            }
+        }
+    }
+
+    /** Appelé hors du fil principal : toutes les enseignes dans le rectangle du trajet. */
+    private fun loadBrandsForRoute(r: Route) {
+        if (!settings.showBrands || r.points.isEmpty()) return
+        try {
+            val found = Nearby.brands(
+                r.points.minOf { it[0] } - 0.03, r.points.minOf { it[1] } - 0.045,
+                r.points.maxOf { it[0] } + 0.03, r.points.maxOf { it[1] } + 0.045,
+            )
+            // On ne garde que celles proches du trajet (moins de 3 km)
+            val near = found.filter { r.projectNear(it.lat, it.lon, 3000.0) != null }
+            main.post { mergeBrands(near) }
+        } catch (e: Exception) {
+            // pas bloquant
+        }
+    }
+
+    private fun mergeBrands(found: List<NearbyPlace>) {
+        brandPlaces = brandPlaces + found.associateBy { it.id }
+        refreshBrandLayer()
+    }
+
+    private fun showFoodMenu() {
+        AlertDialog.Builder(this)
+            .setItems(arrayOf("McDonald's et Burger King", "Tous les restaurants")) { _, which ->
+                if (which == 0) showBrands() else showRestaurants()
+            }
+            .show()
+    }
+
+    /** Points où chercher : devant soi sur le trajet pendant le guidage, sinon autour de soi. */
+    private fun searchPoints(aheadKm: List<Int>): List<DoubleArray> {
+        val loc = lastLocation ?: return emptyList()
+        val r = route
+        if (!navigating || r == null) return listOf(doubleArrayOf(loc.latitude, loc.longitude))
+        val along = r.project(loc.latitude, loc.longitude, segmentHint).along
+        return aheadKm.mapNotNull { km ->
+            val target = along + km * 1000
+            if (target > r.totalDistance) return@mapNotNull null
+            val i = r.cumulative.indexOfFirst { it >= target }.takeIf { it >= 0 } ?: return@mapNotNull null
+            r.points[i]
+        }.ifEmpty { listOf(doubleArrayOf(loc.latitude, loc.longitude)) }
+    }
+
+    private fun showBrands() {
+        val loc = lastLocation ?: run { toast("Position GPS pas encore disponible"); return }
+        val known = brandPlaces.values.toList()
+        if (known.isNotEmpty()) {
+            showNearbyList("McDonald's et Burger King", known)
+            return
+        }
+        toast("Recherche des McDo et Burger King…")
+        io.execute {
+            try {
+                val d = 0.3
+                val found = Nearby.brands(loc.latitude - d, loc.longitude - d * 1.5, loc.latitude + d, loc.longitude + d * 1.5)
+                main.post {
+                    mergeBrands(found)
+                    showNearbyList("McDonald's et Burger King", found)
+                }
+            } catch (e: Exception) {
+                main.post { toast("Recherche impossible : ${e.message}") }
+            }
+        }
+    }
+
+    private fun showRestaurants() {
+        val points = searchPoints(listOf(2, 15, 30))
+        if (points.isEmpty()) { toast("Position GPS pas encore disponible"); return }
+        toast("Recherche des restaurants…")
+        io.execute {
+            try {
+                val found = Nearby.restaurants(points, if (navigating) 2500 else 3000)
+                main.post { showNearbyList("Restaurants", found) }
+            } catch (e: Exception) {
+                main.post { toast("Recherche impossible : ${e.message}") }
+            }
+        }
+    }
+
+    private fun showStations() {
+        val points = searchPoints(listOf(3, 25, 50))
+        if (points.isEmpty()) { toast("Position GPS pas encore disponible"); return }
+        toast("Recherche des stations…")
+        val fuel = settings.fuel
+        io.execute {
+            val found = ArrayList<NearbyPlace>()
+            var failed = false
+            for (p in points) {
+                try {
+                    found += Nearby.stations(p[0], p[1], 10, fuel)
+                } catch (e: Exception) {
+                    failed = true
+                }
+            }
+            if (found.isEmpty() && failed) {
+                try {
+                    points.forEach { found += Nearby.stationsOsm(it[0], it[1], 8000) }
+                } catch (e: Exception) {
+                    // rien
+                }
+            }
+            main.post { showNearbyList("Stations-service", found.distinctBy { it.id }, sortableByPrice = true) }
+        }
+    }
+
+    /**
+     * Liste triée : pendant le guidage, les lieux devant soi à moins de 1,5 km du trajet
+     * (dans l'ordre de passage) ; sinon les plus proches.
+     */
+    private fun showNearbyList(title: String, items: List<NearbyPlace>, sortableByPrice: Boolean = false, byPrice: Boolean = false) {
+        val loc = lastLocation ?: return
+        val r = route
+        val entries: List<Pair<NearbyPlace, String>>
+        if (navigating && r != null) {
+            val along = r.project(loc.latitude, loc.longitude, segmentHint).along
+            val onRoute = items.mapNotNull { n -> r.projectNear(n.lat, n.lon, 1500.0)?.let { n to it.along - along } }
+                .filter { it.second > -200 }
+            val sorted = if (byPrice) onRoute.sortedBy { it.first.price ?: Double.MAX_VALUE } else onRoute.sortedBy { it.second }
+            entries = sorted.map { (n, d) -> n to "sur le trajet, dans ${Geo.formatDistance(d.coerceAtLeast(0.0))}" }
+        } else {
+            val withDist = items.map { it to Geo.distance(loc.latitude, loc.longitude, it.lat, it.lon) }
+            val sorted = if (byPrice) withDist.sortedBy { it.first.price ?: Double.MAX_VALUE } else withDist.sortedBy { it.second }
+            entries = sorted.map { (n, d) -> n to "à ${Geo.formatDistance(d)}" }
+        }
+        val shown = entries.take(40)
+        nearbyShown = shown.map { it.first }
+        refreshNearbyLayer()
+        if (shown.isEmpty()) {
+            toast(if (navigating) "Aucun résultat le long du trajet" else "Aucun résultat à proximité")
+            return
+        }
+        val labels = shown.map { (n, where) ->
+            val star = when (n.brand) { "mcdo" -> "🍟 "; "bk" -> "👑 "; else -> "" }
+            "$star${n.name} · $where" + (n.detail?.let { "\n$it" } ?: "")
+        }
+        val builder = AlertDialog.Builder(this)
+            .setTitle(title)
+            .setItems(labels.toTypedArray()) { _, which -> showNearbyActions(shown[which].first) }
+            .setNegativeButton("Fermer", null)
+        if (sortableByPrice) {
+            builder.setNeutralButton(if (byPrice) "Trier par distance" else "Moins chères d'abord") { _, _ ->
+                showNearbyList(title, items, sortableByPrice = true, byPrice = !byPrice)
+            }
+        }
+        builder.show()
+    }
+
+    private fun showNearbyActions(n: NearbyPlace) {
+        val options = if (navigating) arrayOf("Faire un arrêt ici", "Remplacer la destination", "Voir sur la carte")
+        else arrayOf("Y aller", "Enregistrer en POI", "Voir sur la carte")
+        AlertDialog.Builder(this)
+            .setTitle(n.name)
+            .setMessage(n.detail)
+            .setItems(options) { _, which ->
+                when {
+                    which == 2 -> {
+                        if (navigating && locationReady) map?.locationComponent?.cameraMode = CameraMode.NONE
+                        map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(n.lat, n.lon), 16.0))
+                    }
+                    navigating && which == 0 -> addStop(n.toPlace())
+                    navigating && which == 1 -> {
+                        stopNavigation()
+                        setDestination(n.toPlace())
+                    }
+                    which == 0 -> setDestination(n.toPlace())
+                    else -> {
+                        val category = if (n.kind == NearbyKind.STATION) PoiCategory.STATION else PoiCategory.RESTAURANT
+                        poiStore.add(n.name, category, n.lat, n.lon)
+                        refreshPoiLayer()
+                        toast("POI « ${n.name} » ajouté")
+                    }
+                }
+            }
+            .show()
+    }
+
+    /** Ajoute une étape avant la destination et recalcule le trajet. */
+    private fun addStop(place: Place) {
+        val loc = lastLocation ?: return
+        val dest = destination ?: return
+        stop = place
+        say("Étape ajoutée")
+        computeRoute(loc, dest, isReroute = true)
+    }
+
     // ---------- Menu et réglages ----------
 
     private fun showMainMenu() {
         AlertDialog.Builder(this)
-            .setItems(arrayOf("Mes POIs", "Ajouter ma position en POI", "Nouveautés radars Lufop", "Réglages")) { _, which ->
+            .setItems(arrayOf("Mon agenda", "Mes POIs", "Ajouter ma position en POI", "Stations-service", "Restaurants", "McDonald's et Burger King", "Nouveautés radars Lufop", "Réglages")) { _, which ->
                 when (which) {
-                    0 -> showPoiList()
-                    1 -> lastLocation?.let { showAddPoiDialog(it.latitude, it.longitude) } ?: toast("Position GPS pas encore disponible")
-                    2 -> showLufopNews()
-                    3 -> showSettings()
+                    0 -> showAgenda()
+                    1 -> showPoiList()
+                    2 -> lastLocation?.let { showAddPoiDialog(it.latitude, it.longitude) } ?: toast("Position GPS pas encore disponible")
+                    3 -> showStations()
+                    4 -> showRestaurants()
+                    5 -> showBrands()
+                    6 -> showLufopNews()
+                    7 -> showSettings()
                 }
             }
             .show()
@@ -1193,6 +1605,25 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         layout.addView(label(lufopInfo))
         layout.addView(chargers)
         layout.addView(radars)
+        val brands = CheckBox(this).apply {
+            text = "Afficher McDonald's et Burger King"
+            isChecked = settings.showBrands
+        }
+        layout.addView(brands)
+        val iconKeys = listOf("fleche", "voiture_rouge", "voiture_noire", "voiture_bleue", "moto", "camion")
+        val iconLabels = listOf("Flèche bleue", "Voiture rouge", "Voiture noire", "Voiture bleue", "Moto", "Camion")
+        val iconSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, iconLabels)
+            setSelection(iconKeys.indexOf(settings.positionIcon).coerceAtLeast(0))
+        }
+        layout.addView(label("Icône de ma position"))
+        layout.addView(iconSpinner)
+        val fuelSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, Nearby.fuels.map { it.second })
+            setSelection(Nearby.fuels.indexOfFirst { it.first == settings.fuel }.coerceAtLeast(0))
+        }
+        layout.addView(label("Mon carburant"))
+        layout.addView(fuelSpinner)
 
         fun save(): Boolean {
             val lufopChanged = lufop.text.toString().trim() != settings.lufopKey
@@ -1200,6 +1631,11 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             settings.lufopKey = lufop.text.toString()
             settings.showChargers = chargers.isChecked
             settings.announceRadars = radars.isChecked
+            settings.showBrands = brands.isChecked
+            settings.positionIcon = iconKeys[iconSpinner.selectedItemPosition.coerceAtLeast(0)]
+            settings.fuel = Nearby.fuels[fuelSpinner.selectedItemPosition.coerceAtLeast(0)].first
+            applyPositionIcon()
+            refreshBrandLayer()
             updateTrafficButton()
             updateTrafficLayer()
             osmCenter = null
@@ -1213,7 +1649,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
 
         AlertDialog.Builder(this)
             .setTitle("Réglages")
-            .setView(layout)
+            .setView(ScrollView(this).apply { addView(layout) })
             .setPositiveButton("Enregistrer") { _, _ ->
                 if (save() && settings.hasLufop) syncLufop(manual = true, forceFull = true)
             }
@@ -1243,7 +1679,11 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     // ---------- Cycle de vie de la carte ----------
 
     override fun onStart() { super.onStart(); mapView.onStart() }
-    override fun onResume() { super.onResume(); mapView.onResume() }
+    override fun onResume() {
+        super.onResume()
+        mapView.onResume()
+        refreshAgenda()
+    }
     override fun onPause() { super.onPause(); mapView.onPause() }
     override fun onStop() { super.onStop(); mapView.onStop() }
     override fun onLowMemory() { super.onLowMemory(); mapView.onLowMemory() }

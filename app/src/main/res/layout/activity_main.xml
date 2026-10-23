@@ -59,6 +59,22 @@
                 android:textSize="20sp" />
         </LinearLayout>
 
+        <TextView
+            android:id="@+id/agendaChip"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_card"
+            android:elevation="4dp"
+            android:maxLines="2"
+            android:paddingStart="14dp"
+            android:paddingTop="8dp"
+            android:paddingEnd="14dp"
+            android:paddingBottom="8dp"
+            android:textColor="#1A73E8"
+            android:textSize="14sp"
+            android:visibility="gone" />
+
         <ListView
             android:id="@+id/searchResults"
             android:layout_width="match_parent"
@@ -175,6 +191,28 @@
                 android:layout_gravity="bottom|end"
                 android:gravity="center_horizontal"
                 android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/btnFood"
+                    android:layout_width="52dp"
+                    android:layout_height="52dp"
+                    android:layout_marginBottom="12dp"
+                    android:background="@drawable/bg_round"
+                    android:elevation="4dp"
+                    android:gravity="center"
+                    android:text="🍔"
+                    android:textSize="22sp" />
+
+                <TextView
+                    android:id="@+id/btnFuel"
+                    android:layout_width="52dp"
+                    android:layout_height="52dp"
+                    android:layout_marginBottom="12dp"
+                    android:background="@drawable/bg_round"
+                    android:elevation="4dp"
+                    android:gravity="center"
+                    android:text="⛽"
+                    android:textSize="22sp" />
 
                 <TextView
                     android:id="@+id/btnTraffic"

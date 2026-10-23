@@ -22,6 +22,11 @@ L'APK est compilée automatiquement par GitHub Actions à chaque modification de
 - POIs perso : appui long sur la carte ou menu ☰ › Ajouter ma position, avec catégorie.
 - Bouton ⚠ pour signaler police, radar mobile, accident, danger, travaux, bouchon.
 - Bouton « Waze » pour ouvrir la même destination dans Waze.
+- Agenda du téléphone (Google Agenda, etc.) : rendez-vous avec un lieu, raccourci « Y aller » pour le prochain.
+- Icône de position au choix : flèche, voitures, moto, camion (☰ › Réglages).
+- Stations-service (bouton ⛽) avec prix officiels du carburant choisi (data.economie.gouv.fr), tri par prix.
+- Restaurants et McDonald's / Burger King (bouton 🍔), ces derniers toujours mis en évidence sur la carte.
+- Pendant le guidage, les recherches portent sur le trajet devant soi, avec « Faire un arrêt ici ».
 
 ## Clés gratuites (menu ☰ › Réglages)
 

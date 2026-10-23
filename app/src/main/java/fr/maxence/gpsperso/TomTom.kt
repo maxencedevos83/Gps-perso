@@ -70,8 +70,9 @@ object TomTom {
     }
 
     /** Durée de trajet avec le trafic actuel, et retard dû aux bouchons. */
-    fun eta(key: String, fromLat: Double, fromLon: Double, toLat: Double, toLon: Double): TrafficEta {
-        val url = "https://api.tomtom.com/routing/1/calculateRoute/$fromLat,$fromLon:$toLat,$toLon/json" +
+    fun eta(key: String, fromLat: Double, fromLon: Double, toLat: Double, toLon: Double, via: List<Place> = emptyList()): TrafficEta {
+        val stops = via.joinToString("") { "${it.lat},${it.lon}:" }
+        val url = "https://api.tomtom.com/routing/1/calculateRoute/$fromLat,$fromLon:$stops$toLat,$toLon/json" +
             "?key=${Net.enc(key)}&traffic=true&travelMode=car&routeType=fastest&routeRepresentation=summaryOnly"
         val summary = JSONObject(Net.request(url)).getJSONArray("routes").getJSONObject(0).getJSONObject("summary")
         return TrafficEta(summary.getDouble("travelTimeInSeconds"), summary.optDouble("trafficDelayInSeconds", 0.0))

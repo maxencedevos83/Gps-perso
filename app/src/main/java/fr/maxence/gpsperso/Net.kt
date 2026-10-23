@@ -81,29 +81,39 @@ object Net {
      * Calcule un itinéraire en voiture. heading (cap actuel) évite de proposer un demi-tour
      * quand on recalcule en roulant.
      */
-    fun route(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double, heading: Float?): Route {
+    fun route(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double, heading: Float?, via: List<Place> = emptyList()): Route {
         val origin = JSONObject().put("lat", fromLat).put("lon", fromLon)
         if (heading != null) origin.put("heading", heading.toInt()).put("heading_tolerance", 45)
+        val locations = JSONArray().put(origin)
+        via.forEach { locations.put(JSONObject().put("lat", it.lat).put("lon", it.lon)) }
+        locations.put(JSONObject().put("lat", toLat).put("lon", toLon))
         val body = JSONObject()
-            .put("locations", JSONArray().put(origin).put(JSONObject().put("lat", toLat).put("lon", toLon)))
+            .put("locations", locations)
             .put("costing", "auto")
             .put("directions_options", JSONObject().put("language", "fr-FR").put("units", "kilometers"))
         val trip = JSONObject(request(VALHALLA, body.toString())).getJSONObject("trip")
-        val leg = trip.getJSONArray("legs").getJSONObject(0)
-        val points = Geo.decodePolyline6(leg.getString("shape"))
-        val maneuversJson = leg.getJSONArray("maneuvers")
+        // Un trajet avec étape a plusieurs « legs » : on les met bout à bout.
+        val legs = trip.getJSONArray("legs")
+        val points = ArrayList<DoubleArray>()
         val maneuvers = ArrayList<Maneuver>()
-        for (i in 0 until maneuversJson.length()) {
-            val m = maneuversJson.getJSONObject(i)
-            maneuvers.add(
-                Maneuver(
-                    type = m.optInt("type"),
-                    instruction = m.optString("instruction"),
-                    verbalAlert = m.optString("verbal_transition_alert_instruction").ifBlank { null },
-                    verbalPre = m.optString("verbal_pre_transition_instruction").ifBlank { null },
-                    beginIndex = m.optInt("begin_shape_index").coerceIn(0, (points.size - 1).coerceAtLeast(0)),
+        for (l in 0 until legs.length()) {
+            val leg = legs.getJSONObject(l)
+            val legPoints = Geo.decodePolyline6(leg.getString("shape"))
+            val offset = if (points.isEmpty()) 0 else points.size - 1
+            if (points.isEmpty()) points.addAll(legPoints) else points.addAll(legPoints.drop(1))
+            val maneuversJson = leg.getJSONArray("maneuvers")
+            for (i in 0 until maneuversJson.length()) {
+                val m = maneuversJson.getJSONObject(i)
+                maneuvers.add(
+                    Maneuver(
+                        type = m.optInt("type"),
+                        instruction = m.optString("instruction"),
+                        verbalAlert = m.optString("verbal_transition_alert_instruction").ifBlank { null },
+                        verbalPre = m.optString("verbal_pre_transition_instruction").ifBlank { null },
+                        beginIndex = (m.optInt("begin_shape_index") + offset).coerceIn(0, (points.size - 1).coerceAtLeast(0)),
+                    )
                 )
-            )
+            }
         }
         return Route(points, maneuvers, trip.getJSONObject("summary").optDouble("time", 0.0))
     }
