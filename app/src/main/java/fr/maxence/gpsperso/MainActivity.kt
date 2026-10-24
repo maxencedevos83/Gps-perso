@@ -65,7 +65,8 @@ import java.util.concurrent.Executors
 class MainActivity : Activity(), Nav.Listener {
 
     companion object {
-        private const val STYLE_URL = "https://tiles.openfreemap.org/styles/liberty"
+        private const val STYLE_URL = Offline.STYLE
+        private const val STYLE_DARK = "https://tiles.openfreemap.org/styles/dark"
         private const val REQ_LOCATION = 1
         private const val REQ_CALENDAR = 2
         private const val REQ_IMPORT = 3
@@ -152,18 +153,7 @@ class MainActivity : Activity(), Nav.Listener {
             m.uiSettings.isCompassEnabled = true
             m.uiSettings.isLogoEnabled = false
             applyMapMargins()
-            m.setStyle(Style.Builder().fromUri(STYLE_URL)) { s ->
-                style = s
-                setupLayers(s)
-                updateTrafficLayer()
-                enableLocation()
-                refreshAlertLayer()
-                refreshPoiLayer()
-                refreshBrandLayer()
-                restoreNavigationUi()
-                onAltitude(Nav.altitude)
-                onSpeedLimit(Nav.speedLimit)
-            }
+            loadStyle(wantDark())
             m.addOnMapLongClickListener { latLng ->
                 if (!navigating) showLongPressMenu(latLng.latitude, latLng.longitude)
                 true
@@ -279,6 +269,46 @@ class MainActivity : Activity(), Nav.Listener {
 
     // ---------- Carte ----------
 
+    // ---------- Mode nuit ----------
+
+    private var darkStyle: Boolean? = null
+    private val nightCheck = object : Runnable {
+        override fun run() {
+            if (map != null && darkStyle != null && wantDark() != darkStyle) loadStyle(wantDark())
+            main.postDelayed(this, 60_000)
+        }
+    }
+
+    private fun wantDark(): Boolean = when (settings.nightMode) {
+        "on" -> true
+        "off" -> false
+        else -> {
+            val loc = lastLocation
+            if (loc != null) Sun.isNight(loc.latitude, loc.longitude) else Sun.isNight(46.6, 2.4)
+        }
+    }
+
+    /** Charge le fond de carte (clair ou nuit) puis redessine tout ce que l'appli ajoute dessus. */
+    private fun loadStyle(dark: Boolean) {
+        val m = map ?: return
+        darkStyle = dark
+        style = null
+        m.setStyle(Style.Builder().fromUri(if (dark) STYLE_DARK else STYLE_URL)) { s ->
+            style = s
+            setupLayers(s)
+            updateTrafficLayer()
+            enableLocation()
+            refreshAlertLayer()
+            refreshPoiLayer()
+            refreshBrandLayer()
+            refreshNearbyLayer()
+            refreshParkingLayer()
+            restoreNavigationUi()
+            onAltitude(Nav.altitude)
+            onSpeedLimit(Nav.speedLimit)
+        }
+    }
+
     private fun setupLayers(s: Style) {
         s.addSource(GeoJsonSource("route-src"))
         s.addLayer(
@@ -304,6 +334,25 @@ class MainActivity : Activity(), Nav.Listener {
                 PropertyFactory.circleRadius(9f),
                 PropertyFactory.circleStrokeColor("#FFFFFF"),
                 PropertyFactory.circleStrokeWidth(3f),
+            )
+        )
+        s.addSource(GeoJsonSource("park-src"))
+        s.addLayer(
+            CircleLayer("park-layer", "park-src").withProperties(
+                PropertyFactory.circleColor("#1A73E8"),
+                PropertyFactory.circleRadius(12f),
+                PropertyFactory.circleStrokeColor("#FFFFFF"),
+                PropertyFactory.circleStrokeWidth(3f),
+            )
+        )
+        s.addLayer(
+            SymbolLayer("park-label", "park-src").withProperties(
+                PropertyFactory.textField("P"),
+                PropertyFactory.textFont(arrayOf("Noto Sans Bold")),
+                PropertyFactory.textSize(15f),
+                PropertyFactory.textColor("#FFFFFF"),
+                PropertyFactory.textAllowOverlap(true),
+                PropertyFactory.textIgnorePlacement(true),
             )
         )
         addPointLayers(s, "nearby", 7f)
@@ -530,6 +579,7 @@ class MainActivity : Activity(), Nav.Listener {
                 return true
             }
         }
+        if (m.queryRenderedFeatures(rect, "park-layer").isNotEmpty()) { showParking(); return true }
         val hit = m.queryRenderedFeatures(rect, "pois-layer", "brands-layer", "nearby-layer", "alerts-layer").firstOrNull()
         if (hit != null && hit.hasProperty("id")) {
             val id = hit.getStringProperty("id")
@@ -613,6 +663,8 @@ class MainActivity : Activity(), Nav.Listener {
             "lufop" -> "Lufop"
             "osm" -> "OpenStreetMap"
             "tomtom" -> "Trafic TomTom"
+            "here" -> "Trafic HERE"
+            "bisonfute" -> "Bison Futé"
             else -> "Mon signalement"
         }
         val sheet = Sheet(this).title("${alertIcon(a.type)}  ${a.title}", listOfNotNull(source, distanceLabel(a.lat, a.lon)).joinToString(" · "))
@@ -632,10 +684,10 @@ class MainActivity : Activity(), Nav.Listener {
     }
 
     private fun toggleTraffic() {
-        if (!settings.hasTomTom) {
+        if (!settings.hasTomTom && !settings.hasHere) {
             Sheet(this)
                 .title("🚦  Trafic en temps réel")
-                .text("Ajoutez votre clé TomTom gratuite dans les Réglages pour afficher le trafic, les bouchons et les incidents.")
+                .text("Ajoutez une clé TomTom ou HERE gratuite dans les Réglages pour afficher le trafic, les bouchons et les incidents.")
                 .primary("Ouvrir les Réglages") { showSettings() }
                 .show()
             return
@@ -657,7 +709,7 @@ class MainActivity : Activity(), Nav.Listener {
         s.addLayerBelow(RasterLayer("traffic-layer", "traffic-src").withProperties(PropertyFactory.rasterOpacity(0.85f)), "route-casing")
     }
 
-    private fun trafficActive() = settings.trafficOn && settings.hasTomTom
+    private fun trafficActive() = Nav.trafficActive()
 
     // ---------- Localisation ----------
 
@@ -911,8 +963,16 @@ class MainActivity : Activity(), Nav.Listener {
             trafficDelay >= 60 -> " · dont ${Geo.formatDuration(trafficDelay)} de bouchons"
             else -> " · trafic fluide"
         }
-        routeDetails.text = "Arrivée vers $arrival$traffic"
+        val weather = Nav.weatherWarnings.take(3).joinToString("") { "\n" + it.line }
+        routeDetails.text = "Arrivée vers $arrival$traffic$weather"
     }
+
+    override fun onWeather(warnings: List<Weather.Warning>) {
+        if (!navigating) route?.let { showRouteSummary(it) }
+        else warnings.firstOrNull()?.let { toast(it.line) }
+    }
+
+    override fun onParkingChanged() = refreshParkingLayer()
 
     private fun fitRoute(r: Route) {
         val bounds = LatLngBounds.Builder()
@@ -1005,11 +1065,35 @@ class MainActivity : Activity(), Nav.Listener {
             maneuverArrow.text = man.arrow
             maneuverDistance.text = Geo.formatDistance(p.maneuverDistance)
             maneuverText.text = man.instruction
+            val sign = findViewById<TextView>(R.id.maneuverSign)
+            sign.text = man.sign
+            sign.visibility = if (man.sign.isNullOrBlank()) View.GONE else View.VISIBLE
+            showLanes(man, p.maneuverDistance)
         }
         val arrival = SimpleDateFormat("HH:mm", Locale.FRANCE).format(Date(p.arrivalMillis))
         navEta.text = "$arrival · ${Geo.formatDuration(p.remainingTime)}"
         val traffic = if (p.trafficDelay >= 60) " · bouchons +${Geo.formatDuration(p.trafficDelay)}" else ""
         navRemaining.text = "${Geo.formatDistance(p.remaining)} restants$traffic"
+    }
+
+    /** Voies à prendre (en blanc) à l'approche de la manœuvre, comme sur Google Maps. */
+    private fun showLanes(man: Maneuver, distance: Double) {
+        val v = findViewById<TextView>(R.id.maneuverLanes)
+        val lanes = man.lanes
+        if (lanes.isNullOrEmpty() || distance > 2000) { v.visibility = View.GONE; return }
+        val text = android.text.SpannableStringBuilder()
+        lanes.forEachIndexed { i, lane ->
+            if (i > 0) text.append(" ")
+            val preferred = if (lane.valid) lane.indications.firstOrNull { Lane.laneArrow(it) == man.arrow } else null
+            val start = text.length
+            text.append(lane.arrow(preferred))
+            text.setSpan(
+                android.text.style.ForegroundColorSpan(if (lane.valid) Color.WHITE else Color.parseColor("#7FA7E0")),
+                start, text.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+        v.text = text
+        v.visibility = View.VISIBLE
     }
 
     override fun onAlert(alert: Alert?, distance: Double?) {
@@ -1708,7 +1792,7 @@ class MainActivity : Activity(), Nav.Listener {
     private fun showMainMenu() {
         val next = agendaEvents.firstOrNull()
         val trafficState = when {
-            !settings.hasTomTom -> "Clé TomTom à ajouter"
+            !settings.hasTomTom && !settings.hasHere -> "Clé TomTom ou HERE à ajouter"
             settings.trafficOn -> "Affiché · toucher pour masquer"
             else -> "Masqué · toucher pour afficher"
         }
@@ -1723,7 +1807,9 @@ class MainActivity : Activity(), Nav.Listener {
             .item("🍟", "McDonald's et Burger King", null, "#FFF3C4") { showBrands() }
             .item("🍽️", "Restaurants", null, "#FDE7DD") { showRestaurants() }
             .sectionTitle("Carte")
+            .item("🅿️", "Ma voiture", parkingSummary(), "#E8F0FE") { showParking() }
             .item("🚦", "Trafic en temps réel", trafficState, "#E6F4EA") { toggleTraffic() }
+            .item("📥", "Cartes hors ligne", "Pour rouler sans réseau", "#E6F4EA") { showOfflineMaps() }
             .item("🆕", "Nouveautés radars", lufopStore.lastImport?.let { "Base du $it" } ?: "Aucune base importée", "#F3E8FD") { showLufopNews() }
             .item("⚙️", "Réglages", null, "#F1F3F4") { showSettings() }
             .item("❓", "Aide et nouveautés", "Version ${BuildConfig.VERSION_NAME}", "#E8F0FE") { showHelp() }
@@ -1953,6 +2039,16 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
+                "🚧 Bison Futé : accidents, travaux et routes fermées sur autoroutes et nationales, sans clé.\n" +
+                    "🚦 Trafic HERE en deuxième source (clé gratuite dans ☰ › Réglages › Services connectés).\n" +
+                    "🌦️ Météo sur le trajet : neige, verglas, orages, brouillard à l'heure où vous passerez.\n" +
+                    "🛣️ Voies à prendre et panneaux de sortie dans le bandeau de guidage.\n" +
+                    "🌙 Mode nuit automatique au coucher du soleil (réglable dans Affichage de la carte).\n" +
+                    "📥 Cartes hors ligne : autour de moi, de la maison ou le long du trajet.\n" +
+                    "🅿️ Ma voiture : la place est retenue à l'arrivée, pour la retrouver à pied."
+            )
+            .sectionTitle("Version 10")
+            .text(
                 "⛰ Altitude du lieu où vous êtes, à côté du compteur.\n" +
                     "🚦 Limitation de vitesse de la route au-dessus du compteur (rouge si vous dépassez), aussi dans Android Auto.\n" +
                     "🗣️ Choix de la voix : voix du téléphone ou voix naturelles Google (☰ › Réglages › Voix et annonces).\n" +
@@ -1992,10 +2088,11 @@ class MainActivity : Activity(), Nav.Listener {
             .item("🏠", "Ma maison", if (settings.hasHome) settings.homeName else "Non définie", "#E8F0FE") { showHomeSettings() }
             .item("🚗", "Mon véhicule", "${iconLabels[settings.positionIcon]} · $fuelLabel", "#E8F0FE") { showVehicleSettings() }
             .item("📷", "Radars et alertes", if (count > 0) "$count points Lufop · annonces ${if (settings.announceRadars) "activées" else "coupées"}" else "Lufop à configurer", "#F3E8FD") { showRadarSettings() }
-            .item("🗺️", "Affichage de la carte", "Bornes, McDo / Burger King", "#E6F4EA") { showDisplaySettings() }
+            .item("🗺️", "Affichage de la carte", "Mode nuit, Bison Futé, météo, bornes", "#E6F4EA") { showDisplaySettings() }
             .item("🗣️", "Voix et annonces", voiceSummary(), "#FEF7E0") { showVoiceSettings() }
             .item("🔑", "Services connectés", listOfNotNull(
                 if (settings.hasTomTom) "Trafic TomTom ✓" else "Trafic TomTom ✗",
+                if (settings.hasHere) "HERE ✓" else "HERE ✗",
                 if (settings.hasGoogle) "Avis Google ✓" else "Avis Google ✗",
             ).joinToString(" · "), "#F1F3F4") { showKeySettings() }
             .show()
@@ -2074,10 +2171,25 @@ class MainActivity : Activity(), Nav.Listener {
         val chargers = switchRow("Bornes de recharge", settings.showChargers)
         val brands = switchRow("McDonald's et Burger King en évidence", settings.showBrands)
         val traffic = switchRow("Trafic en temps réel", settings.trafficOn)
-        sheet.view(traffic).view(chargers).view(brands)
+        val bison = switchRow("Bison Futé (accidents, travaux, fermetures)", settings.showBisonFute)
+        val weather = switchRow("Météo sur le trajet", settings.showWeather)
+        sheet.view(traffic).view(bison).view(weather).view(chargers).view(brands)
+        sheet.sectionTitle("Mode nuit")
+        listOf("auto" to "Automatique (coucher du soleil)", "on" to "Toujours sombre", "off" to "Toujours clair").forEach { (key, label) ->
+            sheet.item(if (key == settings.nightMode) "✓" else "🌙", label, null, "#F1F3F4") {
+                settings.nightMode = key
+                loadStyle(wantDark())
+                sheet.dismiss()
+            }
+        }
         sheet.onDismiss {
             settings.showChargers = chargers.isChecked
             settings.showBrands = brands.isChecked
+            if (bison.isChecked != settings.showBisonFute) {
+                settings.showBisonFute = bison.isChecked
+                if (bison.isChecked) Nav.maybeLoadBisonFute(force = true)
+            }
+            settings.showWeather = weather.isChecked
             if (traffic.isChecked != settings.trafficOn) {
                 settings.trafficOn = traffic.isChecked
                 updateTrafficLayer()
@@ -2097,17 +2209,124 @@ class MainActivity : Activity(), Nav.Listener {
         val sheet = Sheet(this).title("🔑  Services connectés", "Clés gratuites, gardées sur ce téléphone")
         sheet.sectionTitle("Trafic TomTom (developer.tomtom.com)")
         val tomtom = sheet.input("Clé API TomTom", settings.tomtomKey)
+        sheet.sectionTitle("Trafic HERE, deuxième source (platform.here.com)")
+        sheet.text("Facultatif : ajoute les incidents HERE à ceux de TomTom. Offre gratuite, sans carte bancaire.", "#5F6368", 13f)
+        val here = sheet.input("Clé API HERE", settings.hereKey)
         sheet.sectionTitle("Notes et avis Google (facultatif)")
         sheet.text("Sans clé, le bouton « Voir les avis sur Google Maps » reste disponible sur chaque restaurant.", "#5F6368", 13f)
         val google = sheet.input("Clé API Google Places", settings.googleKey)
         sheet.primary("Enregistrer") {
             settings.tomtomKey = tomtom.text.toString()
+            settings.hereKey = here.text.toString()
             settings.googleKey = google.text.toString()
             updateTrafficLayer()
             Nav.refreshTrafficNow()
             toast("Clés enregistrées")
         }
         sheet.show()
+    }
+
+    // ---------- Ma voiture ----------
+
+    private fun refreshParkingLayer() {
+        val src = style?.getSourceAs<GeoJsonSource>("park-src") ?: return
+        if (!settings.hasParking) src.setGeoJson(FeatureCollection.fromFeatures(emptyList<Feature>()))
+        else src.setGeoJson(Feature.fromGeometry(Point.fromLngLat(settings.parkLon, settings.parkLat)))
+    }
+
+    private fun parkingSummary(): String {
+        if (!settings.hasParking) return "Aucune place retenue"
+        val ago = (System.currentTimeMillis() - settings.parkTime) / 60_000
+        val time = when {
+            ago < 1 -> "à l'instant"
+            ago < 60 -> "il y a $ago min"
+            ago < 24 * 60 -> "il y a ${ago / 60} h ${ago % 60} min"
+            else -> "le " + SimpleDateFormat("d MMM à HH:mm", Locale.FRANCE).format(Date(settings.parkTime))
+        }
+        return listOfNotNull("Garée $time", distanceLabel(settings.parkLat, settings.parkLon)).joinToString(" · ")
+    }
+
+    private fun showParking() {
+        val sheet = Sheet(this).title("🅿️  Ma voiture", parkingSummary())
+        if (settings.hasParking) {
+            val lat = settings.parkLat
+            val lon = settings.parkLon
+            sheet.primary("🚶  Y aller à pied") { walkTo(lat, lon) }
+            sheet.item("🗺️", "Voir sur la carte", null, "#E8F0FE") { showOnMap(lat, lon) }
+        } else {
+            sheet.text("La place est retenue toute seule à l'arrivée d'un guidage, ou quand Android Auto se déconnecte.", "#5F6368", 14f)
+        }
+        sheet.item("📍", "Je suis garé ici", "Retenir ma position actuelle", "#E6F4EA") {
+            val loc = lastLocation
+            if (loc == null) toast("Position GPS pas encore disponible") else {
+                Nav.saveParking(loc.latitude, loc.longitude)
+                toast("Place retenue")
+            }
+        }
+        if (settings.hasParking) sheet.secondary("Oublier cette place") { Nav.clearParking() }
+        sheet.show()
+    }
+
+    private fun walkTo(lat: Double, lon: Double) {
+        val google = Intent(Intent.ACTION_VIEW, Uri.parse("google.navigation:q=$lat,$lon&mode=w"))
+        try {
+            startActivity(google)
+        } catch (e: ActivityNotFoundException) {
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:$lat,$lon?q=$lat,$lon(Ma voiture)")))
+            } catch (e2: ActivityNotFoundException) {
+                showOnMap(lat, lon)
+            }
+        }
+    }
+
+    // ---------- Cartes hors ligne ----------
+
+    private fun showOfflineMaps() {
+        val sheet = Sheet(this).title("📥  Cartes hors ligne", "Rues et noms de lieux gardés sur le téléphone")
+        sheet.text("Le calcul d'itinéraire, le trafic et la recherche demandent toujours du réseau ; la carte, elle, s'affiche sans.", "#5F6368", 13f)
+        sheet.sectionTitle("Télécharger")
+        lastLocation?.let { loc ->
+            sheet.item("📍", "Autour de moi", "Rayon de 30 km · environ 30 à 80 Mo", "#E6F4EA") {
+                downloadOffline("Autour de ma position", listOf(Offline.boundsAround(loc.latitude, loc.longitude, 30.0)))
+            }
+        }
+        if (settings.hasHome) sheet.item("🏠", "Autour de la maison", "${settings.homeName} · rayon de 30 km", "#E8F0FE") {
+            downloadOffline("Maison", listOf(Offline.boundsAround(settings.homeLat, settings.homeLon, 30.0)))
+        }
+        route?.let { r ->
+            sheet.item("🛣️", "Le long du trajet", "${destination?.name ?: "Destination"} · ${Geo.formatDistance(r.totalDistance)}", "#FEF7E0") {
+                downloadOffline("Trajet vers ${destination?.name ?: "destination"}", Offline.routeBounds(r))
+            }
+        }
+        val slot = sheet.slot()
+        slot.addView(TextView(this).apply { text = "Recherche des cartes enregistrées…"; setTextColor(Color.parseColor("#5F6368")) })
+        sheet.show()
+        Offline.list(this) { zones ->
+            slot.removeAllViews()
+            if (zones.isEmpty()) {
+                slot.addView(TextView(this).apply { text = "Aucune carte enregistrée pour l'instant."; setTextColor(Color.parseColor("#5F6368")) })
+                return@list
+            }
+            zones.forEach { z ->
+                val size = String.format(Locale.FRANCE, "%.0f Mo", z.bytes / 1_048_576.0)
+                slot.addView(sheet.infoRow("🗂️", "${z.name}\n$size${if (z.complete) "" else " · incomplète"} · toucher pour supprimer") {
+                    Sheet(this).title("Supprimer « ${z.name} » ?", size)
+                        .primary("Supprimer", "#D93025") { Offline.delete(z) { toast("Carte supprimée") } }
+                        .secondary("Annuler") {}
+                        .show()
+                })
+            }
+        }
+    }
+
+    private fun downloadOffline(name: String, boxes: List<LatLngBounds>) {
+        toast("Téléchargement de « $name »…")
+        Offline.download(this, name, boxes, progress = { done, total ->
+            if (total > 1 && done > 0 && done < total) toast("« $name » : $done / $total")
+        }) { error ->
+            toast(if (error == null) "« $name » disponible hors ligne" else "« $name » : téléchargement incomplet")
+        }
     }
 
     private fun switchRow(label: String, checked: Boolean) = Switch(this).apply {
@@ -2132,8 +2351,10 @@ class MainActivity : Activity(), Nav.Listener {
         mapView.onResume()
         refreshAgenda()
         updateMuteButton()
+        main.removeCallbacks(nightCheck)
+        main.post(nightCheck)
     }
-    override fun onPause() { super.onPause(); mapView.onPause() }
+    override fun onPause() { super.onPause(); mapView.onPause(); main.removeCallbacks(nightCheck) }
     override fun onStop() { super.onStop(); mapView.onStop() }
     override fun onLowMemory() { super.onLowMemory(); mapView.onLowMemory() }
 

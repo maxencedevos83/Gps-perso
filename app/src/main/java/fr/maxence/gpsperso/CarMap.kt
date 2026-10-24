@@ -143,7 +143,8 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
             m.uiSettings.isCompassEnabled = false
             val start = Nav.lastLocation?.let { LatLng(it.latitude, it.longitude) } ?: LatLng(46.6, 2.4)
             m.cameraPosition = CameraPosition.Builder().target(start).zoom(if (Nav.lastLocation != null) 15.0 else 5.0).build()
-            m.setStyle(Style.Builder().fromUri(STYLE_URL)) { s ->
+            val url = if (carContext.isDarkMode) "https://tiles.openfreemap.org/styles/dark" else STYLE_URL
+            m.setStyle(Style.Builder().fromUri(url)) { s ->
                 style = s
                 setupLayers(s)
                 enableLocation(s)

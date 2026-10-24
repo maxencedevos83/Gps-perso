@@ -61,6 +61,8 @@ class GpsCarSession : Session() {
         lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onDestroy(owner: LifecycleOwner) {
                 m.release()
+                // Voiture coupée ou téléphone débranché : on retient la place de stationnement
+                Nav.lastLocation?.let { Nav.saveParking(it.latitude, it.longitude) }
                 Nav.detach(this@GpsCarSession)
             }
         })
@@ -143,9 +145,54 @@ object CarUi {
         else -> CarManeuver.TYPE_UNKNOWN
     }
 
-    fun step(m: Maneuver): Step = Step.Builder(m.instruction)
-        .setManeuver(CarManeuver.Builder(maneuverType(m.type)).setIcon(textIcon(m.arrow)).build())
-        .build()
+    fun step(m: Maneuver): Step {
+        val b = Step.Builder(m.instruction)
+            .setManeuver(CarManeuver.Builder(maneuverType(m.type)).setIcon(textIcon(m.arrow)).build())
+        m.sign?.takeIf { it.isNotBlank() }?.let { b.setRoad(it) }
+        val lanes = m.lanes
+        if (!lanes.isNullOrEmpty()) {
+            lanes.forEach { lane ->
+                val lb = androidx.car.app.navigation.model.Lane.Builder()
+                val preferred = if (lane.valid) lane.indications.firstOrNull { Lane.laneArrow(it) == m.arrow } else null
+                lane.indications.ifEmpty { listOf("straight") }.forEach { ind ->
+                    lb.addDirection(androidx.car.app.navigation.model.LaneDirection.create(laneShape(ind), lane.valid && (preferred == null || ind == preferred)))
+                }
+                b.addLane(lb.build())
+            }
+            b.setLanesImage(lanesIcon(m, lanes))
+        }
+        return b.build()
+    }
+
+    private fun laneShape(i: String) = when (i) {
+        "slight right" -> androidx.car.app.navigation.model.LaneDirection.SHAPE_SLIGHT_RIGHT
+        "right" -> androidx.car.app.navigation.model.LaneDirection.SHAPE_NORMAL_RIGHT
+        "sharp right" -> androidx.car.app.navigation.model.LaneDirection.SHAPE_SHARP_RIGHT
+        "slight left" -> androidx.car.app.navigation.model.LaneDirection.SHAPE_SLIGHT_LEFT
+        "left" -> androidx.car.app.navigation.model.LaneDirection.SHAPE_NORMAL_LEFT
+        "sharp left" -> androidx.car.app.navigation.model.LaneDirection.SHAPE_SHARP_LEFT
+        "uturn" -> androidx.car.app.navigation.model.LaneDirection.SHAPE_U_TURN_LEFT
+        else -> androidx.car.app.navigation.model.LaneDirection.SHAPE_STRAIGHT
+    }
+
+    /** Image des voies : flèches blanches pour les voies à prendre, grises pour les autres. */
+    private fun lanesIcon(m: Maneuver, lanes: List<Lane>): CarIcon {
+        val cell = 64
+        val bmp = Bitmap.createBitmap(cell * lanes.size, cell, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = cell * 0.8f
+            textAlign = Paint.Align.CENTER
+            isFakeBoldText = true
+        }
+        val y = cell / 2f - (paint.descent() + paint.ascent()) / 2f
+        lanes.forEachIndexed { i, lane ->
+            val preferred = if (lane.valid) lane.indications.firstOrNull { Lane.laneArrow(it) == m.arrow } else null
+            paint.color = if (lane.valid) Color.WHITE else Color.GRAY
+            canvas.drawText(lane.arrow(preferred), cell * i + cell / 2f, y, paint)
+        }
+        return CarIcon.Builder(IconCompat.createWithBitmap(bmp)).build()
+    }
 
     /** Lance un trajet depuis la voiture : le guidage démarre dès que l'itinéraire est calculé. */
     fun go(screen: Screen, place: Place) {
@@ -186,6 +233,7 @@ class NavScreen(carContext: CarContext, private val carMap: CarMap) : Screen(car
     private fun safe(block: () -> Unit) = try { block() } catch (e: Exception) { }
 
     override fun onRouteReady(r: Route, isReroute: Boolean) { computing = false; invalidate() }
+    override fun onWeather(warnings: List<Weather.Warning>) = invalidate()
     override fun onRouteError(message: String, isReroute: Boolean) {
         computing = false
         if (!isReroute) CarToast.makeText(carContext, "Itinéraire introuvable", CarToast.LENGTH_LONG).show()
@@ -245,7 +293,8 @@ class NavScreen(carContext: CarContext, private val carMap: CarMap) : Screen(car
                 val traffic = if (Nav.trafficActive() && Nav.trafficDelay >= 60) " · bouchons +${Geo.formatDuration(Nav.trafficDelay)}" else ""
                 b.setNavigationInfo(
                     MessageInfo.Builder(dest.name)
-                        .setText("${Geo.formatDuration(Nav.etaSeconds)} · ${Geo.formatDistance(route.totalDistance)}$traffic")
+                        .setText("${Geo.formatDuration(Nav.etaSeconds)} · ${Geo.formatDistance(route.totalDistance)}$traffic" +
+                            (Nav.weatherWarnings.firstOrNull()?.let { "\n${it.line}" } ?: ""))
                         .build()
                 )
             } else if (dest != null) {
