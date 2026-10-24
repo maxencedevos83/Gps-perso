@@ -222,7 +222,7 @@ class MainActivity : Activity(), Nav.Listener {
         findViewById<View>(R.id.btnStart).setOnClickListener { startNavigation() }
         findViewById<View>(R.id.btnCancel).setOnClickListener { clearRoute() }
         findViewById<View>(R.id.btnStop).setOnClickListener { stopNavigation() }
-        findViewById<View>(R.id.btnWaze).setOnClickListener { openInWaze() }
+        findViewById<View>(R.id.btnWaze).setOnClickListener { saveDestination() }
     }
 
     // ---------- Affichage plein écran : on décale l'interface sous les barres Android ----------
@@ -886,7 +886,27 @@ class MainActivity : Activity(), Nav.Listener {
         searchInput.clearFocus()
     }
 
+    /** Une destination est déjà choisie : on propose d'en faire une étape plutôt que de la remplacer. */
     private fun setDestination(place: Place) {
+        val current = destination
+        if (current != null && route != null && Geo.distance(current.lat, current.lon, place.lat, place.lon) > 50) {
+            Sheet(this).title("📍  ${place.name}", "Vous allez déjà vers ${current.name}")
+                .primary("➕  Ajouter comme étape") { addStop(place) }
+                .secondary("Remplacer la destination") { replaceDestination(place) }
+                .show()
+            return
+        }
+        replaceDestination(place)
+    }
+
+    private fun saveDestination() {
+        val d = destination ?: return
+        val existing = poiStore.all().firstOrNull { Geo.distance(it.lat, it.lon, d.lat, d.lon) < 30 }
+        if (existing != null) { toast("Déjà enregistré : « ${existing.name} »"); return }
+        showAddPoiDialog(d.lat, d.lon, d.name.takeIf { it != "Point sur la carte" })
+    }
+
+    private fun replaceDestination(place: Place) {
         if (!Nav.setDestination(place)) { toast("Position GPS pas encore disponible"); return }
         agendaChip.visibility = View.GONE
         drawDestination(place)
@@ -901,7 +921,7 @@ class MainActivity : Activity(), Nav.Listener {
         drawRoute(r)
         drawDestination(destination)
         io.execute { loadBrandsForRoute(r) }
-        if (isReroute || navigating) return
+        if (navigating) return
         destination?.let { routeTitle.text = it.name }
         routePanel.visibility = View.VISIBLE
         updateBottomSpacer()
@@ -964,7 +984,8 @@ class MainActivity : Activity(), Nav.Listener {
             else -> " · trafic fluide"
         }
         val weather = Nav.weatherWarnings.take(3).joinToString("") { "\n" + it.line }
-        routeDetails.text = "Arrivée vers $arrival$traffic$weather"
+        val via = Nav.stop?.let { "\nÉtape : ${it.name}" } ?: ""
+        routeDetails.text = "Arrivée vers $arrival$traffic$via$weather"
     }
 
     override fun onWeather(warnings: List<Weather.Warning>) {
@@ -999,11 +1020,6 @@ class MainActivity : Activity(), Nav.Listener {
         routePanel.visibility = View.GONE
         updateBottomSpacer()
         updateAgendaChip()
-    }
-
-    private fun openInWaze() {
-        val d = destination ?: return
-        openInWaze(d.lat, d.lon)
     }
 
     private fun openInWaze(lat: Double, lon: Double) {
@@ -1241,11 +1257,11 @@ class MainActivity : Activity(), Nav.Listener {
         sheet.show()
     }
 
-    private fun showAddPoiDialog(lat: Double, lon: Double) {
-        val sheet = Sheet(this).title("⭐  Nouveau POI", distanceLabel(lat, lon))
-        val name = sheet.input("Nom du POI")
+    private fun showAddPoiDialog(lat: Double, lon: Double, suggestedName: String? = null) {
+        val sheet = Sheet(this).title("⭐  Enregistrer ce lieu", distanceLabel(lat, lon))
+        val name = sheet.input("Nom du lieu", suggestedName.orEmpty())
         // Nom proposé d'après l'adresse, modifiable
-        io.execute {
+        if (suggestedName.isNullOrBlank()) io.execute {
             val suggestion = try { Net.reverse(lat, lon) } catch (e: Exception) { null }
             if (suggestion != null) main.post { if (name.text.isEmpty()) name.setText(suggestion) }
         }
@@ -2039,7 +2055,9 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "🚧 Bison Futé : accidents, travaux et routes fermées sur autoroutes et nationales, sans clé.\n" +
+                "☆ Bouton « Enregistrer » sur l'itinéraire, à la place de Waze (Waze reste dans l'appui long sur la carte).\n" +
+                    "➕ Choisir une autre destination pendant un trajet propose d'en faire une étape.\n" +
+                    "🚧 Bison Futé : accidents, travaux et routes fermées sur autoroutes et nationales, sans clé.\n" +
                     "🚦 Trafic HERE en deuxième source (clé gratuite dans ☰ › Réglages › Services connectés).\n" +
                     "🌦️ Météo sur le trajet : neige, verglas, orages, brouillard à l'heure où vous passerez.\n" +
                     "🛣️ Voies à prendre et panneaux de sortie dans le bandeau de guidage.\n" +

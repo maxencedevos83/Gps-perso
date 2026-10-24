@@ -384,7 +384,7 @@
                     android:gravity="center"
                     android:paddingStart="16dp"
                     android:paddingEnd="16dp"
-                    android:text="Waze"
+                    android:text="☆ Enregistrer"
                     android:textColor="#1A73E8"
                     android:textSize="15sp" />
 
