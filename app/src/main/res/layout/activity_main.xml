@@ -194,17 +194,13 @@
 
                 <TextView
                     android:id="@+id/btnHome"
-                    android:layout_width="wrap_content"
+                    android:layout_width="52dp"
                     android:layout_height="52dp"
-                    android:background="@drawable/bg_button"
+                    android:background="@drawable/bg_round_blue"
                     android:elevation="6dp"
                     android:gravity="center"
-                    android:paddingStart="18dp"
-                    android:paddingEnd="18dp"
-                    android:text="🏠  Maison"
-                    android:textColor="#FFFFFF"
-                    android:textSize="16sp"
-                    android:textStyle="bold" />
+                    android:text="🏠"
+                    android:textSize="22sp" />
 
                 <TextView
                     android:id="@+id/btnRecents"

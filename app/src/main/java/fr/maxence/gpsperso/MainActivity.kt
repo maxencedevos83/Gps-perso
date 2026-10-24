@@ -51,6 +51,7 @@ import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.PropertyFactory
 import org.maplibre.android.style.layers.RasterLayer
 import org.maplibre.android.style.layers.SymbolLayer
+import org.maplibre.android.style.sources.GeoJsonOptions
 import org.maplibre.android.style.sources.GeoJsonSource
 import org.maplibre.android.style.sources.RasterSource
 import org.maplibre.android.style.sources.TileSet
@@ -199,7 +200,10 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
 
         tts = TextToSpeech(this, this)
         requestLocationPermission()
-        io.execute { lufopStore.all() } // préchargement du cache
+        io.execute {
+            importBundledRadars()
+            lufopStore.all() // préchargement du cache
+        }
         val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         if (settings.hasLufop && settings.lufopLastUpdate != today) updateFromLufopApi(manual = false)
         main.postDelayed(ticker, 60_000)
@@ -325,7 +329,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             )
         )
         addPointLayers(s, "nearby", 7f)
-        addPointLayers(s, "alerts", 7f)
+        addAlertLayers(s)
         addPointLayers(s, "pois", 9f)
         // McDonald's / Burger King bien visibles : gros rond aux couleurs de l'enseigne
         s.addSource(GeoJsonSource("brands-src"))
@@ -438,12 +442,95 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         return !radar || settings.announceRadars
     }
 
+    /**
+     * Alertes : pictogrammes (📷 radar, 🚦 feu rouge, 👮 police...) regroupés en pastilles
+     * numérotées quand la carte est dézoomée, pour garder une carte lisible.
+     */
+    private fun addAlertLayers(s: Style) {
+        AlertType.entries.forEach { t -> s.addImage("alert-${t.name}", alertBitmap(alertIcon(t), t.color)) }
+        s.addSource(GeoJsonSource("alerts-src", GeoJsonOptions().withCluster(true).withClusterMaxZoom(12).withClusterRadius(45)))
+        s.addLayer(
+            CircleLayer("alerts-clusters", "alerts-src")
+                .withFilter(Expression.has("point_count"))
+                .withProperties(
+                    PropertyFactory.circleColor("#5F6368"),
+                    PropertyFactory.circleOpacity(0.85f),
+                    PropertyFactory.circleRadius(
+                        Expression.step(Expression.get("point_count"), Expression.literal(13f),
+                            Expression.stop(10, 16f), Expression.stop(100, 20f), Expression.stop(1000, 25f))
+                    ),
+                    PropertyFactory.circleStrokeColor("#FFFFFF"),
+                    PropertyFactory.circleStrokeWidth(2f),
+                )
+        )
+        s.addLayer(
+            SymbolLayer("alerts-count", "alerts-src")
+                .withFilter(Expression.has("point_count"))
+                .withProperties(
+                    PropertyFactory.textField(Expression.toString(Expression.get("point_count_abbreviated"))),
+                    PropertyFactory.textFont(arrayOf("Noto Sans Bold")),
+                    PropertyFactory.textSize(12f),
+                    PropertyFactory.textColor("#FFFFFF"),
+                    PropertyFactory.textAllowOverlap(true),
+                )
+        )
+        s.addLayer(
+            SymbolLayer("alerts-layer", "alerts-src")
+                .withFilter(Expression.not(Expression.has("point_count")))
+                .withProperties(
+                    PropertyFactory.iconImage(Expression.get("icon")),
+                    PropertyFactory.iconSize(
+                        Expression.interpolate(Expression.linear(), Expression.zoom(),
+                            Expression.stop(10, 0.6f), Expression.stop(15, 1f))
+                    ),
+                    PropertyFactory.iconAllowOverlap(true),
+                    PropertyFactory.iconIgnorePlacement(true),
+                )
+        )
+        s.addLayer(
+            SymbolLayer("alerts-labels", "alerts-src")
+                .withFilter(Expression.not(Expression.has("point_count")))
+                .withProperties(
+                    PropertyFactory.textField(Expression.get("label")),
+                    PropertyFactory.textFont(arrayOf("Noto Sans Bold")),
+                    PropertyFactory.textSize(11f),
+                    PropertyFactory.textOffset(arrayOf(0f, 1.7f)),
+                    PropertyFactory.textAnchor(Property.TEXT_ANCHOR_TOP),
+                    PropertyFactory.textColor("#202124"),
+                    PropertyFactory.textHaloColor("#FFFFFF"),
+                    PropertyFactory.textHaloWidth(1.5f),
+                    PropertyFactory.textOptional(true),
+                ).also { it.minZoom = 14f }
+        )
+    }
+
+    /** Pictogramme rond : fond blanc, liseré de la couleur du type, icône au centre. */
+    private fun alertBitmap(icon: String, color: String): android.graphics.Bitmap {
+        val size = dp(30)
+        val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+        bmp.density = resources.displayMetrics.densityDpi
+        val c = android.graphics.Canvas(bmp)
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        paint.color = Color.parseColor(color)
+        c.drawCircle(size / 2f, size / 2f, size / 2f, paint)
+        paint.color = Color.WHITE
+        c.drawCircle(size / 2f, size / 2f, size / 2f - dp(3), paint)
+        val text = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = size * 0.5f
+            textAlign = android.graphics.Paint.Align.CENTER
+        }
+        val y = size / 2f - (text.descent() + text.ascent()) / 2f
+        c.drawText(icon, size / 2f, y, text)
+        return bmp
+    }
+
     private fun refreshAlertLayer() {
         val src = style?.getSourceAs<GeoJsonSource>("alerts-src") ?: return
         val features = allAlerts().map { a ->
             Feature.fromGeometry(Point.fromLngLat(a.lon, a.lat)).also {
-                it.addStringProperty("color", a.type.color)
-                it.addStringProperty("label", a.title)
+                it.addStringProperty("icon", "alert-${a.type.name}")
+                // Libellé court : la vitesse pour un radar, sinon rien (le pictogramme suffit)
+                it.addStringProperty("label", a.detail ?: "")
                 it.addStringProperty("id", a.id)
             }
         }
@@ -469,6 +556,13 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         val point = m.projection.toScreenLocation(latLng)
         val r = dp(14).toFloat()
         val rect = RectF(point.x - r, point.y - r, point.x + r, point.y + r)
+        m.queryRenderedFeatures(rect, "alerts-clusters").firstOrNull()?.let { cluster ->
+            val p = cluster.geometry() as? Point
+            if (p != null) {
+                m.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(p.latitude(), p.longitude()), m.cameraPosition.zoom + 2))
+                return true
+            }
+        }
         val hit = m.queryRenderedFeatures(rect, "pois-layer", "brands-layer", "nearby-layer", "alerts-layer").firstOrNull()
         if (hit != null && hit.hasProperty("id")) {
             val id = hit.getStringProperty("id")
@@ -1184,6 +1278,28 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         computeRouteAlerts()
     }
 
+    /** Bases fournies avec l'appli (radars Espagne), importées une seule fois au premier lancement. */
+    private fun importBundledRadars() {
+        val prefs = getSharedPreferences("bundled", Context.MODE_PRIVATE)
+        val files = try { assets.list("radars")?.toList().orEmpty() } catch (e: Exception) { emptyList() }
+        var changed = false
+        for (f in files) {
+            if (prefs.getBoolean(f, false)) continue
+            try {
+                val items = RadarFile.parse(f, assets.open("radars/$f").use { it.readBytes() })
+                if (items.isNotEmpty()) lufopStore.import(LufopStore.datasetName(f), items)
+                prefs.edit().putBoolean(f, true).apply()
+                changed = true
+            } catch (e: Exception) {
+                // on réessaiera au prochain lancement
+            }
+        }
+        if (changed) main.post {
+            refreshAlertLayer()
+            computeRouteAlerts()
+        }
+    }
+
     /** Ouvre le sélecteur de fichiers pour importer une base Lufop (CSV, GPX, KML, OV2 ou ZIP). */
     /** Ouvre le sélecteur de fichiers pour importer une base Lufop (CSV, GPX, KML, OV2, JSON ou ZIP). */
     private fun importRadarFile() {
@@ -1207,7 +1323,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         io.execute {
             try {
                 val items = LufopApi.download(key)
-                val result = lufopStore.import(items)
+                val result = lufopStore.import("api-lufop", items)
                 settings.lufopLastUpdate = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
                 main.post {
                     refreshAlertLayer()
@@ -1250,7 +1366,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
                 val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: throw IllegalStateException("Fichier illisible")
                 val items = RadarFile.parse(fileName, bytes)
                 if (items.isEmpty()) throw IllegalStateException("Aucun point reconnu dans « $fileName ». Formats acceptés : CSV, GPX, KML, OV2 ou ZIP.")
-                val result = lufopStore.import(items)
+                val result = lufopStore.import(LufopStore.datasetName(fileName), items)
                 main.post {
                     refreshAlertLayer()
                     computeRouteAlerts()
@@ -1960,12 +2076,26 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             save()
             importRadarFile()
         }
-        if (count > 0) sheet.secondary("Effacer la base importée") {
-            save()
-            lufopStore.clear()
-            refreshAlertLayer()
-            computeRouteAlerts()
-            toast("Base Lufop effacée")
+        val sets = lufopStore.datasetSizes()
+        if (sets.isNotEmpty()) sheet.sectionTitle("Bases importées (toucher pour supprimer)")
+        sets.forEach { (name, size) ->
+            val label = when (name) {
+                "api-lufop" -> "Lufop (API)"
+                "ESRADARES" -> "Radars Espagne"
+                else -> name
+            }
+            sheet.item("🗂️", label, "$size points", "#F3E8FD") {
+                save()
+                Sheet(this).title("Supprimer « $label » ?", "$size points")
+                    .primary("Supprimer", "#D93025") {
+                        lufopStore.remove(name)
+                        refreshAlertLayer()
+                        computeRouteAlerts()
+                        toast("« $label » supprimée")
+                    }
+                    .secondary("Annuler") {}
+                    .show()
+            }
         }
         sheet.onDismiss { save() }
         sheet.show()

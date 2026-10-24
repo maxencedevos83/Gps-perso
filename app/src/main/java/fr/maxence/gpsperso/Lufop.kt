@@ -2,6 +2,7 @@ package fr.maxence.gpsperso
 
 import android.content.Context
 import org.json.JSONArray
+import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.nio.ByteBuffer
@@ -14,26 +15,51 @@ import java.util.zip.ZipInputStream
 class ImportResult(val imported: Int, val added: List<Alert>, val total: Int, val firstImport: Boolean)
 
 /**
- * Base radars / bornes importée depuis un fichier téléchargé sur lufop.net
- * (ou tout fichier de POI au format CSV, GPX, KML, OV2, éventuellement dans un ZIP).
+ * Bases radars / bornes importées (API Lufop, fichiers lufop.net ou tout fichier de POI CSV, GPX,
+ * KML, OV2, JSON, éventuellement dans un ZIP). Chaque source est un « jeu » séparé : réimporter
+ * un fichier du même nom le remplace, sans toucher aux autres (France, Espagne...).
  */
 class LufopStore(context: Context) {
     private val file = File(context.filesDir, "lufop.json")
     private val prefs = context.getSharedPreferences("lufop", Context.MODE_PRIVATE)
+    @Volatile private var datasets: Map<String, List<Alert>>? = null
     @Volatile private var cache: List<Alert>? = null
 
     val lastImport: String? get() = prefs.getString("last_import", null)
 
+    @Synchronized
+    private fun load(): Map<String, List<Alert>> {
+        datasets?.let { return it }
+        val map = LinkedHashMap<String, List<Alert>>()
+        if (file.exists()) {
+            val text = try { file.readText() } catch (e: Exception) { "" }
+            fun parseArray(a: JSONArray) = (0 until a.length()).mapNotNull { a.optJSONObject(it)?.let { o -> Alert.fromJson(o) } }
+            try {
+                if (text.trimStart().startsWith("[")) {
+                    map["ancien"] = parseArray(JSONArray(text)) // format des versions précédentes
+                } else {
+                    val o = JSONObject(text)
+                    o.keys().forEach { k -> map[k] = parseArray(o.getJSONArray(k)) }
+                }
+            } catch (e: Exception) {
+                // fichier abîmé : on repart de zéro
+            }
+        }
+        datasets = map
+        return map
+    }
+
     fun all(): List<Alert> {
         cache?.let { return it }
-        val list = ArrayList<Alert>()
-        if (file.exists()) {
-            val array = try { JSONArray(file.readText()) } catch (e: Exception) { JSONArray() }
-            for (i in 0 until array.length()) array.optJSONObject(i)?.let { Alert.fromJson(it) }?.let { list.add(it) }
-        }
+        val list = load().values.flatten().distinctBy { it.id }
         cache = list
         return list
     }
+
+    /** Jeux importés avec leur nombre de points. */
+    fun datasetSizes(): Map<String, Int> = load().mapValues { it.value.size }
+
+    fun has(dataset: String) = load().containsKey(dataset)
 
     /** Éléments apparus lors du dernier import. */
     fun recent(): List<Alert> {
@@ -41,32 +67,48 @@ class LufopStore(context: Context) {
         return all().filter { it.id in ids }
     }
 
-    /**
-     * Remplace les éléments des mêmes types que ceux du fichier (un fichier radars ne supprime pas
-     * les bornes importées avant) et repère les nouveautés.
-     */
-    fun import(items: List<Alert>): ImportResult {
-        val existing = all()
-        val types = items.map { it.type }.toSet()
-        val previousOfTypes = existing.filter { it.type in types }
-        val previousIds = previousOfTypes.map { it.id }.toSet()
-        val added = if (previousOfTypes.isEmpty()) emptyList() else items.filter { it.id !in previousIds }
-        val merged = existing.filter { it.type !in types } + items
-        val array = JSONArray()
-        merged.forEach { array.put(it.toJson()) }
-        file.writeText(array.toString())
-        cache = merged
+    /** Remplace le jeu « dataset » et repère les nouveautés par rapport à sa version précédente. */
+    @Synchronized
+    fun import(dataset: String, items: List<Alert>): ImportResult {
+        val map = LinkedHashMap(load())
+        val previous = map[dataset].orEmpty()
+        val previousIds = previous.map { it.id }.toSet()
+        val added = if (previous.isEmpty()) emptyList() else items.filter { it.id !in previousIds }
+        map[dataset] = items
+        save(map)
         prefs.edit()
             .putString("last_import", SimpleDateFormat("dd/MM/yyyy", Locale.FRANCE).format(Date()))
             .putStringSet("recent_ids", added.map { it.id }.toSet())
             .apply()
-        return ImportResult(items.size, added, merged.size, previousOfTypes.isEmpty())
+        return ImportResult(items.size, added, all().size, previous.isEmpty())
     }
 
+    @Synchronized
+    fun remove(dataset: String) {
+        val map = LinkedHashMap(load())
+        map.remove(dataset)
+        save(map)
+    }
+
+    @Synchronized
     fun clear() {
         file.delete()
+        datasets = emptyMap()
         cache = emptyList()
         prefs.edit().clear().apply()
+    }
+
+    private fun save(map: Map<String, List<Alert>>) {
+        val o = JSONObject()
+        map.forEach { (k, list) -> o.put(k, JSONArray().also { a -> list.forEach { a.put(it.toJson()) } }) }
+        file.writeText(o.toString())
+        datasets = map
+        cache = null
+    }
+
+    companion object {
+        /** Nom de jeu tiré du nom de fichier : « ESRADARES.csv » → « ESRADARES ». */
+        fun datasetName(fileName: String) = fileName.substringAfterLast('/').substringBeforeLast('.').ifBlank { "fichier" }
     }
 }
 
@@ -187,7 +229,7 @@ object RadarFile {
         }
     }
 
-    private val speedRegex = Regex("(?<!\\d)(20|30|40|45|50|60|70|80|90|100|110|130)(?!\\d)")
+    private val speedRegex = Regex("(?<!\\d)(20|25|30|40|45|50|60|70|80|90|100|110|120|130)(?!\\d)")
 
     private fun make(fileName: String, lat: Double, lon: Double, label: String, speed: String? = null): Alert? {
         if (lat !in -90.0..90.0 || lon !in -180.0..180.0 || (lat == 0.0 && lon == 0.0)) return null
@@ -246,7 +288,11 @@ object RadarFile {
         for (raw in text.lineSequence()) {
             val line = raw.trim()
             if (line.isEmpty() || line.startsWith("#") || line.startsWith(";")) continue
-            val fields = splitCsv(line)
+            // Ligne entière entre guillemets avec guillemets doublés à l'intérieur (exports Lufop)
+            val unwrapped = if (line.length > 2 && line.startsWith("\"") && line.endsWith("\"") && "\"\"" in line) {
+                line.substring(1, line.length - 1).replace("\"\"", "\"")
+            } else line
+            val fields = splitCsv(unwrapped)
             val numbers = fields.mapIndexedNotNull { i, f -> f.replace(',', '.').toDoubleOrNull()?.let { i to it } }
             if (numbers.size < 2) continue
             val (i1, a) = numbers[0]
