@@ -2086,7 +2086,8 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "🔍 Pendant le guidage, le véhicule est en bas de l'écran et la carte zoome toute seule selon la vitesse et à l'approche des sorties.\n" +
+                "🚦 Limitation de vitesse plus fiable : la route est reconnue en 1 à 2 secondes.\n" +
+                    "🔍 Pendant le guidage, le véhicule est en bas de l'écran et la carte zoome toute seule selon la vitesse et à l'approche des sorties.\n" +
                     "☆ Bouton « Enregistrer » sur l'itinéraire, à la place de Waze (Waze reste dans l'appui long sur la carte).\n" +
                     "➕ Choisir une autre destination pendant un trajet propose d'en faire une étape.\n" +
                     "🚧 Bison Futé : accidents, travaux et routes fermées sur autoroutes et nationales, sans clé.\n" +

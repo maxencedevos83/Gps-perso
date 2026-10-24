@@ -13,6 +13,7 @@ object SpeedLimit {
     private class Way(val points: List<DoubleArray>, val limit: Int?, val forward: Int?, val backward: Int?, val oneway: Boolean)
 
     private val io = Executors.newSingleThreadExecutor()
+    private val traceIo = Executors.newSingleThreadExecutor()
     @Volatile private var ways: List<Way> = emptyList()
     private var center: Location? = null
     private var loading = false
@@ -21,13 +22,25 @@ object SpeedLimit {
     private var last: Int? = null
     private var lastFoundAt = 0L
 
-    private const val RADIUS = 1000
-    private const val RELOAD_DISTANCE = 600f
+    private const val RADIUS = 1500
+    private const val RELOAD_DISTANCE = 900f
+
+    // Recalage Valhalla (source principale, rapide)
+    private val trail = ArrayList<DoubleArray>()
+    private var trailLast: Location? = null
+    private var traceLoading = false
+    private var traceAt = 0L
+    private var traceFrom: Location? = null
+    @Volatile private var traceLimit: Int? = null
+    @Volatile private var traceOk = false
+    @Volatile private var traceResultAt = 0L
 
     /** Limite en km/h pour la position donnée, ou null si inconnue. Appelé sur le fil principal. */
     fun update(loc: Location): Int? {
+        maybeTrace(loc)
         maybeLoad(loc)
-        val found = match(loc)
+        val now0 = System.currentTimeMillis()
+        val found = if (traceOk && now0 - traceResultAt < 25_000) traceLimit ?: match(loc) else match(loc)
         val now = System.currentTimeMillis()
         if (found != null) {
             last = found
@@ -38,18 +51,49 @@ object SpeedLimit {
         return last
     }
 
+    private fun maybeTrace(loc: Location) {
+        val prev = trailLast
+        val precise = !loc.hasAccuracy() || loc.accuracy <= 50
+        if (precise && (prev == null || prev.distanceTo(loc) >= 15)) {
+            trail += doubleArrayOf(loc.latitude, loc.longitude)
+            trailLast = loc
+            while (trail.size > 8) trail.removeAt(0)
+        }
+        if (traceLoading || trail.size < 2) return
+        val now = System.currentTimeMillis()
+        if (now - traceAt < 5_000) return
+        val from = traceFrom
+        if (from != null && from.distanceTo(loc) < 40 && now - traceAt < 60_000) return
+        traceLoading = true
+        traceAt = now
+        traceFrom = loc
+        val points = trail.toList()
+        traceIo.execute {
+            try {
+                traceLimit = Net.matchedSpeedLimit(points)
+                traceOk = true
+                traceResultAt = System.currentTimeMillis()
+            } catch (e: Exception) {
+                traceOk = false
+            } finally {
+                traceLoading = false
+            }
+        }
+    }
+
     private fun maybeLoad(loc: Location) {
         val c = center
         if (loading) return
         if (c != null && c.distanceTo(loc) < RELOAD_DISTANCE) return
-        if (System.currentTimeMillis() - lastFailAt < 20_000) return
+        if (System.currentTimeMillis() - lastFailAt < 60_000) return
         loading = true
         val lat = loc.latitude
         val lon = loc.longitude
         io.execute {
             try {
-                val q = "[out:json][timeout:10];way(around:$RADIUS,$lat,$lon)[highway~\"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|road)(_link)?$\"];out tags geom;"
-                val json = Net.overpassQuick(q)
+                // Seulement les routes qui ont une limitation (réponse 6 fois plus légère)
+                val q = "[out:json][timeout:25];way(around:$RADIUS,$lat,$lon)[highway~\"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|road)(_link)?$\"][~\"^(maxspeed|maxspeed:forward|maxspeed:backward|zone:maxspeed)$\"~\".\"];out tags geom qt;"
+                val json = Net.overpassQuick(q, timeoutMs = 25_000)
                 ways = parse(json)
                 center = Location("osm").apply { latitude = lat; longitude = lon }
             } catch (e: Exception) {

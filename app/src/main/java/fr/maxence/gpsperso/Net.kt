@@ -19,11 +19,42 @@ object Net {
     private const val USER_AGENT = "GPSPerso/0.1 (application personnelle Android)"
     private const val PHOTON = "https://photon.komoot.io/api/"
     private const val VALHALLA = "https://valhalla1.openstreetmap.de/route"
+    private const val VALHALLA_TRACE = "https://valhalla1.openstreetmap.de/trace_attributes"
+
+    /**
+     * Limitation de la route où l'on roule : les dernières positions GPS sont recalées sur la carte
+     * par Valhalla (rapide, ~1 s), qui renvoie la vitesse maximale OpenStreetMap de la route.
+     * Renvoie null si la route n'a pas de limitation connue.
+     */
+    fun matchedSpeedLimit(points: List<DoubleArray>): Int? {
+        val shape = JSONArray()
+        points.forEach { shape.put(JSONObject().put("lat", it[0]).put("lon", it[1])) }
+        val body = JSONObject()
+            .put("shape", shape)
+            .put("costing", "auto")
+            .put("shape_match", "map_snap")
+            .put("filters", JSONObject()
+                .put("attributes", JSONArray(listOf("edge.speed_limit", "edge.road_class", "matched.edge_index", "matched.type")))
+                .put("action", "include"))
+        val json = JSONObject(request(VALHALLA_TRACE, body.toString(), timeoutMs = 10_000))
+        val edges = json.optJSONArray("edges") ?: return null
+        val matched = json.optJSONArray("matched_points") ?: return null
+        var edgeIndex = -1
+        for (i in matched.length() - 1 downTo 0) {
+            val m = matched.getJSONObject(i)
+            if (m.optString("type") == "matched" && m.has("edge_index")) { edgeIndex = m.getInt("edge_index"); break }
+        }
+        val edge = edges.optJSONObject(edgeIndex) ?: return null
+        val limit = edge.optInt("speed_limit", 0)
+        if (limit in 5..200) return limit
+        return if (edge.optString("road_class") == "motorway") 130 else null
+    }
     /** Plusieurs serveurs Overpass publics : si l'un est saturé, on passe au suivant. */
     private val OVERPASS_SERVERS = listOf(
         "https://overpass-api.de/api/interpreter",
         "https://overpass.kumi.systems/api/interpreter",
         "https://overpass.private.coffee/api/interpreter",
+        "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
     )
     private val overpassLock = Any()
 
@@ -78,11 +109,11 @@ object Net {
      * Petite requête Overpass pour une fiche lieu : sans attendre les grosses requêtes en cours,
      * délai court, et on tente le serveur suivant si le premier traîne.
      */
-    fun overpassQuick(query: String): JSONObject {
+    fun overpassQuick(query: String, timeoutMs: Int = 7_000): JSONObject {
         var lastError: Exception? = null
         for (server in OVERPASS_SERVERS) {
             try {
-                return JSONObject(request(server, "data=${enc(query)}", "application/x-www-form-urlencoded", timeoutMs = 7_000))
+                return JSONObject(request(server, "data=${enc(query)}", "application/x-www-form-urlencoded", timeoutMs = timeoutMs))
             } catch (e: Exception) {
                 lastError = e
             }
