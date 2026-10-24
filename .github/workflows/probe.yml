@@ -4,22 +4,32 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Overpass limitations de vitesse
+      - name: Valhalla trace_attributes limitations
         run: |
           python3 - <<'PY'
-          import urllib.request, urllib.parse, time, json
-          servers=["https://overpass-api.de/api/interpreter","https://overpass.kumi.systems/api/interpreter","https://overpass.private.coffee/api/interpreter","https://maps.mail.ru/osm/tools/overpass/api/interpreter"]
-          pts=[(43.135,5.93),(43.25,6.07),(48.85,2.35)]
-          old='[out:json][timeout:10];way(around:1000,{lat},{lon})[highway~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|road)(_link)?$"];out tags geom;'
-          new='[out:json][timeout:15];way(around:1500,{lat},{lon})[highway~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|road)(_link)?$"][~"^(maxspeed|maxspeed:forward|maxspeed:backward|zone:maxspeed)$"~"."];out tags geom qt;'
-          for s in servers:
-            for name,q in (('old',old),('new',new)):
-              for lat,lon in pts[:2]:
-                t=time.time()
-                try:
-                  req=urllib.request.Request(s,data=('data='+urllib.parse.quote(q.format(lat=lat,lon=lon))).encode(),headers={'User-Agent':'GPSPerso/0.1 probe'})
-                  b=urllib.request.urlopen(req,timeout=30).read()
-                  j=json.loads(b); print(s.split('/')[2],name,lat,'OK',round(time.time()-t,1),'s',len(b)//1024,'KB',len(j['elements']),'ways', sum(1 for e in j['elements'] if 'maxspeed' in e.get('tags',{})))
-                except Exception as e:
-                  print(s.split('/')[2],name,lat,'ERR',round(time.time()-t,1),'s',str(e)[:80])
+          import urllib.request, time, json
+          # A57 vers Toulon puis D554 / ville
+          traces={
+           'A57':[(43.1475,5.9905),(43.1465,5.9870),(43.1455,5.9835),(43.1447,5.9800)],
+           'ville':[(43.1245,5.9300),(43.1247,5.9310),(43.1249,5.9320),(43.1251,5.9330)],
+          }
+          for name,pts in traces.items():
+            body={"shape":[{"lat":a,"lon":b} for a,b in pts],"costing":"auto","shape_match":"map_snap",
+                  "filters":{"attributes":["edge.speed_limit","edge.road_class","edge.names","edge.length","matched.edge_index","matched.type"],"action":"include"}}
+            t=time.time()
+            try:
+              req=urllib.request.Request("https://valhalla1.openstreetmap.de/trace_attributes",data=json.dumps(body).encode(),headers={'User-Agent':'GPSPerso/0.1 probe','Content-Type':'application/json'})
+              r=json.loads(urllib.request.urlopen(req,timeout=30).read())
+              print(name,'OK',round(time.time()-t,2),'s')
+              print(json.dumps(r)[:1500])
+            except Exception as e:
+              print(name,'ERR',e, getattr(e,'read',lambda:b'')()[:300])
+          # locate verbose
+          body={"locations":[{"lat":43.1465,"lon":5.9870}],"costing":"auto","verbose":True}
+          req=urllib.request.Request("https://valhalla1.openstreetmap.de/locate",data=json.dumps(body).encode(),headers={'User-Agent':'GPSPerso/0.1 probe','Content-Type':'application/json'})
+          t=time.time()
+          try:
+            r=urllib.request.urlopen(req,timeout=30).read().decode(); print('locate',round(time.time()-t,2),'s'); 
+            import re; print(re.findall(r'"speed_limit":\s*\w+',r)[:10]); print(r[:1200])
+          except Exception as e: print('locate ERR',e)
           PY
