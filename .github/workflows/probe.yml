@@ -4,35 +4,21 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Styles OpenFreeMap
+      - name: Bison Futé DATEX II détails
         run: |
-          for s in liberty dark positron bright fiord; do echo "== $s"; curl -s -m 20 -o /dev/null -w "%{http_code}\n" https://tiles.openfreemap.org/styles/$s; done
-      - name: Bison Futé DATEX II
-        run: |
-          for u in \
-            https://tipi.bison-fute.gouv.fr/bison-fute-ouvert/publicationsDIR/Evenementiel-DIR/grt/RRN/content.xml \
-            https://tipi.bison-fute.gouv.fr/bison-fute-ouvert/publicationsDIR/Evenementiel-DIR/ ; do
-            echo "== $u"; curl -s -m 60 -D - "$u" -o /tmp/bf.xml | head -5; ls -la /tmp/bf.xml; head -c 3000 /tmp/bf.xml; echo; grep -o 'xsi:type="[A-Za-z]*"' /tmp/bf.xml | sort | uniq -c | sort -rn | head -30
-          done
-      - name: Valhalla voies (lanes)
-        run: |
-          curl -s -m 60 https://valhalla1.openstreetmap.de/route -H 'Content-Type: application/json' -d '{"locations":[{"lat":43.1242,"lon":5.9280},{"lat":43.0975,"lon":6.1460}],"costing":"auto","directions_options":{"language":"fr-FR"}}' > /tmp/v.json
-          python3 -c "
-          import json; d=json.load(open('/tmp/v.json'))
-          m=d['trip']['legs'][0]['maneuvers']
-          print(len(m)); print(json.dumps(m[3],ensure_ascii=False)[:1500])
-          print(set(k for x in m for k in x.keys()))"
-          curl -s -m 60 https://valhalla1.openstreetmap.de/route -H 'Content-Type: application/json' -d '{"locations":[{"lat":43.1242,"lon":5.9280},{"lat":43.0975,"lon":6.1460}],"costing":"auto","format":"osrm","banner_instructions":true,"directions_options":{"language":"fr-FR"}}' > /tmp/o.json
-          python3 -c "
-          import json; d=json.load(open('/tmp/o.json'))
-          steps=d['routes'][0]['legs'][0]['steps']
-          n=0
-          for s in steps:
-            for i in s.get('intersections',[]):
-              if 'lanes' in i:
-                n+=1
-                if n<4: print(json.dumps(i['lanes'])); print(s['maneuver'])
-            if 'bannerInstructions' in s and n<2: print(json.dumps(s['bannerInstructions'],ensure_ascii=False)[:1200])
-          print('steps with lanes',n,'of',len(steps))"
-      - name: Open-Meteo multi-points
-        run: curl -s -m 30 "https://api.open-meteo.com/v1/forecast?latitude=43.12,45.18&longitude=5.93,5.72&hourly=precipitation,snowfall,temperature_2m,wind_gusts_10m,weather_code&forecast_hours=6&timezone=auto" | head -c 1500
+          curl -s -m 60 https://tipi.bison-fute.gouv.fr/bison-fute-ouvert/publicationsDIR/Evenementiel-DIR/grt/RRN/content.xml -o /tmp/bf.xml
+          python3 - <<'PY'
+          import re
+          s=open('/tmp/bf.xml',encoding='utf-8').read()
+          print('types', sorted(set(re.findall(r'situationRecord xsi:type="ns2:(\w+)"',s))))
+          from collections import Counter
+          print(Counter(re.findall(r'situationRecord xsi:type="ns2:(\w+)"',s)))
+          sits=re.findall(r'<ns2:situation .*?</ns2:situation>',s,re.S)
+          print('situations',len(sits))
+          tags=Counter(re.findall(r'<ns2:(\w+)',s))
+          print([t for t in tags if 'oord' in t or 'atitude' in t or 'ocation' in t or 'oint' in t or 'linear' in t.lower()])
+          for x in sits[:1]+[y for y in sits if 'Accident' in y][:1]+[y for y in sits if 'MaintenanceWorks' in y][:1]:
+            print('-----'); print(re.sub(r'\s+',' ',x)[:6000])
+          print('cause types', Counter(re.findall(r'<ns2:(accidentType|roadMaintenanceType|obstructionType|abnormalTrafficType|roadOrCarriagewayOrLaneManagementType|environmentalObstructionType|poorEnvironmentType|vehicleObstructionType|generalObstructionType|equipmentOrSystemFaultType|disturbanceActivityType|nonWeatherRelatedRoadConditionType|weatherRelatedRoadConditionType)>(\w+)<',s)).most_common(40))
+          PY
+          curl -s -m 30 https://tipi.bison-fute.gouv.fr/bison-fute-ouvert/publicationsDIR/Evenementiel-DIR/cnir/ | grep -o 'href="[^"]*"' | head
