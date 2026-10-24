@@ -10,14 +10,12 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.RectF
 import android.location.Location
-import android.location.LocationListener
 import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.speech.tts.TextToSpeech
 import android.text.InputType
 import android.view.KeyEvent
 import android.view.View
@@ -64,18 +62,14 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
 
-class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
+class MainActivity : Activity(), Nav.Listener {
 
     companion object {
         private const val STYLE_URL = "https://tiles.openfreemap.org/styles/liberty"
         private const val REQ_LOCATION = 1
         private const val REQ_CALENDAR = 2
         private const val REQ_IMPORT = 3
-        private const val OFF_ROUTE_METERS = 50.0
-        private const val ALERT_AHEAD_METERS = 800.0
-        private const val FREE_DRIVE_ALERT_METERS = 500.0
-        private const val INCIDENTS_REFRESH_MS = 15 * 60_000L
-        private const val ETA_REFRESH_MS = 10 * 60_000L
+        private const val REQ_NOTIF = 4
     }
 
     private lateinit var mapView: MapView
@@ -110,64 +104,37 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     private lateinit var poiStore: PoiStore
     private lateinit var recentStore: RecentStore
     private lateinit var lufopStore: LufopStore
-    private var tts: TextToSpeech? = null
-    private var ttsReady = false
     private var insetTop = 0
     private var insetBottom = 0
 
-    private var lastLocation: Location? = null
+    // État du guidage : partagé avec Android Auto, il vit dans Nav.
+    private val lastLocation: Location? get() = Nav.lastLocation
+    private val destination: Place? get() = Nav.destination
+    private val route: Route? get() = Nav.route
+    private val navigating: Boolean get() = Nav.navigating
+    private val segmentHint: Int get() = Nav.segmentHint
+    private val etaSeconds: Double get() = Nav.etaSeconds
+    private val trafficDelay: Double get() = Nav.trafficDelay
+
     private var searchPlaces: List<Place> = emptyList()
-    private var destination: Place? = null
-    private var route: Route? = null
-    private var navigating = false
-    private var segmentHint = 0
-    private var offRouteCount = 0
-    private var rerouting = false
-    private var lastRerouteAt = 0L
-    private val spoken = HashSet<String>()
-
-    /** Durée de référence (trafic compris si dispo) pour une distance restante de référence. */
-    private var etaSeconds = 0.0
-    private var etaDistance = 0.0
-    private var trafficDelay = 0.0
-    private var lastEtaAt = 0L
-
-    /** Radars et bornes OSM autour de la zone utile. */
-    private var osmAlerts: List<Alert> = emptyList()
-    private var osmCenter: Location? = null
-    private var osmLoading = false
-    /** Incidents TomTom (accidents, bouchons, travaux...). */
-    private var incidents: Map<String, Alert> = emptyMap()
-    private var lastIncidentsAt = 0L
-    private var incidentsCenter: Location? = null
     /** McDonald's et Burger King connus (autour de soi et le long du trajet). */
     private var brandPlaces: Map<String, NearbyPlace> = emptyMap()
     private var brandsCenter: Location? = null
     /** Derniers résultats « à proximité » affichés sur la carte. */
     private var nearbyShown: List<NearbyPlace> = emptyList()
-    /** Étape facultative (station, resto) avant la destination. */
-    private var stop: Place? = null
     private var agendaEvents: List<AgendaEvent> = emptyList()
-
-    /** Alertes situées sur l'itinéraire, avec leur position (m) depuis le départ. */
-    private var routeAlerts: List<Pair<Alert, Double>> = emptyList()
-
-    private val ticker = object : Runnable {
-        override fun run() {
-            periodicRefresh()
-            main.postDelayed(this, 60_000)
-        }
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         MapLibre.getInstance(this)
         setContentView(R.layout.activity_main)
-        settings = Settings(this)
-        alertStore = AlertStore(this)
-        poiStore = PoiStore(this)
-        recentStore = RecentStore(this)
-        lufopStore = LufopStore(this)
+        Nav.init(this)
+        Nav.addListener(this)
+        settings = Nav.settings
+        alertStore = Nav.alertStore
+        poiStore = Nav.poiStore
+        recentStore = Nav.recentStore
+        lufopStore = Nav.lufopStore
         bindViews()
         setupEdgeToEdge()
         updateTrafficButton()
@@ -186,6 +153,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
                 refreshAlertLayer()
                 refreshPoiLayer()
                 refreshBrandLayer()
+                restoreNavigationUi()
             }
             m.addOnMapLongClickListener { latLng ->
                 if (!navigating) showLongPressMenu(latLng.latitude, latLng.longitude)
@@ -198,7 +166,6 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             m.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(46.6, 2.4), 5.0))
         }
 
-        tts = TextToSpeech(this, this)
         requestLocationPermission()
         io.execute {
             importBundledRadars()
@@ -206,7 +173,6 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         }
         val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         if (settings.hasLufop && settings.lufopLastUpdate != today) updateFromLufopApi(manual = false)
-        main.postDelayed(ticker, 60_000)
     }
 
     private fun bindViews() {
@@ -427,20 +393,9 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         else src.setGeoJson(Feature.fromGeometry(Point.fromLngLat(p.lon, p.lat)))
     }
 
-    /** Toutes les alertes connues : radars (Lufop sinon OSM), bornes, incidents TomTom, signalements perso. */
-    private fun allAlerts(): List<Alert> {
-        val lufop = lufopStore.all()
-        val hasImportedRadars = lufop.any { it.type != AlertType.BORNE }
-        val osm = osmAlerts.filter { it.type == AlertType.BORNE || !hasImportedRadars }
-        return (lufop + osm + incidents.values + alertStore.all())
-            .filter { it.type != AlertType.BORNE || settings.showChargers }
-    }
+    private fun allAlerts(): List<Alert> = Nav.allAlerts()
 
-    private fun isAnnounced(a: Alert): Boolean {
-        if (!a.type.announce) return false
-        val radar = a.type == AlertType.RADAR_FIXE || a.type == AlertType.RADAR_FEU || a.type == AlertType.RADAR_MOBILE
-        return !radar || settings.announceRadars
-    }
+    private fun isAnnounced(a: Alert): Boolean = Nav.isAnnounced(a)
 
     /**
      * Alertes : pictogrammes (📷 radar, 🚦 feu rouge, 👮 police...) regroupés en pastilles
@@ -652,8 +607,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         if (!navigating) sheet.primary("▲  Y aller") { setDestination(Place(a.title, a.description ?: "", a.lat, a.lon)) }
         if (a.source == "moi") sheet.secondary("Supprimer ce signalement") {
             alertStore.remove(a.id)
-            refreshAlertLayer()
-            computeRouteAlerts()
+            Nav.alertsChanged()
         }
         sheet.show()
     }
@@ -676,14 +630,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         settings.trafficOn = !settings.trafficOn
         updateTrafficButton()
         updateTrafficLayer()
-        if (settings.trafficOn) {
-            lastIncidentsAt = 0
-            periodicRefresh()
-        } else {
-            incidents = emptyMap()
-            refreshAlertLayer()
-            computeRouteAlerts()
-        }
+        if (settings.trafficOn) Nav.refreshTrafficNow() else Nav.clearIncidents()
         toast(if (settings.trafficOn) "Trafic affiché" else "Trafic masqué")
     }
 
@@ -699,75 +646,6 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
 
     private fun trafficActive() = settings.trafficOn && settings.hasTomTom
 
-    private fun loadIncidents(boxes: List<DoubleArray>) {
-        if (!trafficActive() || boxes.isEmpty()) return
-        lastIncidentsAt = System.currentTimeMillis()
-        val key = settings.tomtomKey
-        io.execute {
-            val found = ArrayList<Alert>()
-            var error: String? = null
-            for (b in boxes) {
-                try {
-                    found += TomTom.incidents(key, b[0], b[1], b[2], b[3])
-                } catch (e: Exception) {
-                    error = e.message
-                }
-            }
-            main.post {
-                incidents = incidents + found.associateBy { it.id }
-                refreshAlertLayer()
-                computeRouteAlerts()
-                if (error != null && found.isEmpty()) toast("Incidents TomTom indisponibles : $error")
-            }
-        }
-    }
-
-    private fun refreshEta(from: Location) {
-        val dest = destination ?: return
-        val r = route ?: return
-        if (!trafficActive()) return
-        lastEtaAt = System.currentTimeMillis()
-        val key = settings.tomtomKey
-        val viaStop = stop
-        val remaining = if (navigating) (r.totalDistance - r.project(from.latitude, from.longitude, segmentHint).along) else r.totalDistance
-        io.execute {
-            try {
-                val eta = TomTom.eta(key, from.latitude, from.longitude, dest.lat, dest.lon, listOfNotNull(viaStop))
-                main.post {
-                    if (route !== r) return@post
-                    etaSeconds = eta.travelTime
-                    etaDistance = remaining.coerceAtLeast(1.0)
-                    trafficDelay = eta.delay
-                    if (!navigating) showRouteSummary(r)
-                }
-            } catch (e: Exception) {
-                // on garde la durée Valhalla
-            }
-        }
-    }
-
-    /** Toutes les minutes : incidents et heure d'arrivée rafraîchis selon les besoins. */
-    private fun periodicRefresh() {
-        val loc = lastLocation ?: return
-        if (!trafficActive()) return
-        val now = System.currentTimeMillis()
-        val r = route
-        if (navigating && r != null) {
-            if (now - lastIncidentsAt > INCIDENTS_REFRESH_MS) {
-                val along = r.project(loc.latitude, loc.longitude, segmentHint).along
-                loadIncidents(TomTom.boxesAlong(r, along, along + 90_000, maxBoxes = 2))
-            }
-            if (now - lastEtaAt > ETA_REFRESH_MS) refreshEta(loc)
-        } else if (!navigating) {
-            val center = incidentsCenter
-            val moved = center == null || center.distanceTo(loc) > 15_000
-            if (moved || now - lastIncidentsAt > INCIDENTS_REFRESH_MS) {
-                incidentsCenter = loc
-                loadIncidents(listOf(doubleArrayOf(loc.latitude - 0.3, loc.longitude - 0.45, loc.latitude + 0.3, loc.longitude + 0.45)))
-            }
-        }
-    }
-
     // ---------- Localisation ----------
 
     private fun hasLocationPermission() =
@@ -782,7 +660,17 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         else missing += listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
         if (hasCalendarPermission()) refreshAgenda()
         else missing += Manifest.permission.READ_CALENDAR
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            missing += Manifest.permission.POST_NOTIFICATIONS
+        }
         if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), REQ_LOCATION)
+    }
+
+    /** Notification de guidage (écran verrouillé) : demandée au premier guidage si besoin. */
+    private fun askNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIF)
+        }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -802,20 +690,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         }
     }
 
-    @SuppressLint("MissingPermission")
-    private fun startLocationUpdates() {
-        if (!hasLocationPermission()) return
-        val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        val providers = lm.getProviders(true)
-        if (LocationManager.GPS_PROVIDER in providers) {
-            lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this, Looper.getMainLooper())
-        }
-        if (LocationManager.NETWORK_PROVIDER in providers) {
-            lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 5000L, 0f, this, Looper.getMainLooper())
-        }
-        val last = providers.mapNotNull { lm.getLastKnownLocation(it) }.maxByOrNull { it.time }
-        if (last != null) onLocationChanged(last)
-    }
+    private fun startLocationUpdates() = Nav.attach(this)
 
     @SuppressLint("MissingPermission")
     private fun enableLocation() {
@@ -871,30 +746,15 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         m.locationComponent.renderMode = if (navigating) RenderMode.GPS else idleRenderMode()
     }
 
-    override fun onLocationChanged(location: Location) {
-        val previous = lastLocation
-        // On ignore la position réseau (imprécise) si le GPS a répondu récemment.
-        if (location.provider == LocationManager.NETWORK_PROVIDER && previous != null &&
-            previous.provider == LocationManager.GPS_PROVIDER && location.time - previous.time < 10_000
-        ) return
-        val first = previous == null
-        lastLocation = location
-        if (locationReady) map?.locationComponent?.forceLocationUpdate(location)
+    override fun onLocation(loc: Location, first: Boolean) {
+        if (locationReady) map?.locationComponent?.forceLocationUpdate(loc)
         if (first && locationReady && !navigating) {
-            map?.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(location.latitude, location.longitude), 14.0))
+            map?.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(loc.latitude, loc.longitude), 14.0))
         }
-        speedText.text = if (location.hasSpeed()) (location.speed * 3.6f).toInt().toString() else "0"
-
-        if (navigating) updateNavigation(location) else checkFreeDriveAlerts(location)
-        maybeLoadOsmAround(location)
-        maybeLoadBrandsAround(location)
-        if (first) periodicRefresh()
+        speedText.text = if (loc.hasSpeed()) (loc.speed * 3.6f).toInt().toString() else "0"
+        maybeLoadBrandsAround(loc)
     }
 
-    override fun onProviderEnabled(provider: String) {}
-    override fun onProviderDisabled(provider: String) {}
-    @Deprecated("Requis sur les anciennes versions d'Android")
-    override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
 
     private fun recenter() {
         val m = map ?: return
@@ -958,10 +818,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     }
 
     private fun setDestination(place: Place) {
-        val loc = lastLocation ?: run { toast("Position GPS pas encore disponible"); return }
-        destination = place
-        if (place.name != "Point sur la carte") recentStore.add(place)
-        stop = null
+        if (!Nav.setDestination(place)) { toast("Position GPS pas encore disponible"); return }
         agendaChip.visibility = View.GONE
         drawDestination(place)
         routeTitle.text = place.name
@@ -969,54 +826,48 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         routeDetails.text = place.address
         routePanel.visibility = View.VISIBLE
         updateBottomSpacer()
-        computeRoute(loc, place, isReroute = false)
     }
 
-    private fun computeRoute(from: Location, to: Place, isReroute: Boolean) {
-        rerouting = true
-        val via = listOfNotNull(stop)
-        val heading = if (from.hasBearing() && from.hasSpeed() && from.speed > 3) from.bearing else null
-        io.execute {
-            try {
-                val r = Net.route(from.latitude, from.longitude, to.lat, to.lon, heading, via)
-                main.post { onRouteReady(r, isReroute) }
-                loadOsmForRoute(r)
-                loadBrandsForRoute(r)
-            } catch (e: Exception) {
-                main.post {
-                    rerouting = false
-                    if (isReroute) {
-                        toast("Recalcul impossible, nouvel essai bientôt")
-                    } else {
-                        routeSummary.text = "Itinéraire introuvable"
-                        routeDetails.text = e.message ?: ""
-                    }
-                }
-            }
-        }
-    }
-
-    private fun onRouteReady(r: Route, isReroute: Boolean) {
-        rerouting = false
-        lastRerouteAt = System.currentTimeMillis()
-        route = r
-        segmentHint = 0
-        offRouteCount = 0
-        etaSeconds = r.totalTime
-        etaDistance = r.totalDistance.coerceAtLeast(1.0)
-        trafficDelay = 0.0
-        spoken.removeAll { it.startsWith("m-") }
+    override fun onRouteReady(r: Route, isReroute: Boolean) {
         drawRoute(r)
-        computeRouteAlerts()
-        lastLocation?.let { refreshEta(it) }
-        if (isReroute) {
-            say("Nouvel itinéraire")
-            if (trafficActive()) loadIncidents(TomTom.boxesAlong(r, 0.0, 90_000.0, maxBoxes = 2))
-            return
-        }
-        if (trafficActive()) loadIncidents(TomTom.boxesAlong(r))
+        drawDestination(destination)
+        io.execute { loadBrandsForRoute(r) }
+        if (isReroute || navigating) return
+        destination?.let { routeTitle.text = it.name }
+        routePanel.visibility = View.VISIBLE
+        updateBottomSpacer()
         showRouteSummary(r)
         routePanel.post { fitRoute(r) }
+    }
+
+    override fun onRouteError(message: String, isReroute: Boolean) {
+        if (isReroute) {
+            toast("Recalcul impossible, nouvel essai bientôt")
+        } else {
+            routeSummary.text = "Itinéraire introuvable"
+            routeDetails.text = message
+        }
+    }
+
+    override fun onEtaChanged() {
+        if (!navigating) route?.let { showRouteSummary(it) }
+    }
+
+    override fun onAlertsChanged() = refreshAlertLayer()
+
+    override fun onMessage(text: String) = toast(text)
+
+    /** L'appli revient au premier plan (ou la voiture a lancé un trajet) : on remet l'interface à jour. */
+    private fun restoreNavigationUi() {
+        val r = route ?: return
+        drawRoute(r)
+        drawDestination(destination)
+        if (navigating) onNavigationStarted() else {
+            destination?.let { routeTitle.text = it.name }
+            routePanel.visibility = View.VISIBLE
+            updateBottomSpacer()
+            showRouteSummary(r)
+        }
     }
 
     private fun showRouteSummary(r: Route) {
@@ -1047,12 +898,9 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         }
     }
 
-    private fun clearRoute() {
-        stopNavigation()
-        route = null
-        destination = null
-        stop = null
-        routeAlerts = emptyList()
+    private fun clearRoute() = Nav.clearRoute()
+
+    override fun onRouteCleared() {
         drawRoute(null)
         drawDestination(null)
         routePanel.visibility = View.GONE
@@ -1076,11 +924,10 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
 
     // ---------- Guidage ----------
 
-    private fun startNavigation() {
-        val r = route ?: return
-        val m = map ?: return
-        navigating = true
-        spoken.clear()
+    private fun startNavigation() = Nav.startNavigation()
+
+    override fun onNavigationStarted() {
+        askNotificationPermission()
         routePanel.visibility = View.GONE
         navPanel.visibility = View.VISIBLE
         maneuverBanner.visibility = View.VISIBLE
@@ -1088,19 +935,19 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         hideSearchResults()
         updateBottomSpacer()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        val m = map ?: return
         if (locationReady) {
             m.locationComponent.renderMode = RenderMode.GPS
             m.locationComponent.cameraMode = CameraMode.TRACKING_GPS
             m.locationComponent.zoomWhileTracking(17.0)
             m.locationComponent.tiltWhileTracking(50.0)
         }
-        r.maneuvers.firstOrNull()?.let { say(it.verbalPre ?: it.instruction) }
-        lastLocation?.let { updateNavigation(it) }
+        Nav.lastProgress?.let { onProgress(it) }
     }
 
-    private fun stopNavigation() {
-        if (!navigating) return
-        navigating = false
+    private fun stopNavigation() = Nav.stopNavigation()
+
+    override fun onNavigationStopped() {
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         maneuverBanner.visibility = View.GONE
         navPanel.visibility = View.GONE
@@ -1118,101 +965,21 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             }
             m.animateCamera(CameraUpdateFactory.tiltTo(0.0))
         }
-        tts?.stop()
     }
 
-    private fun updateNavigation(loc: Location) {
-        val r = route ?: return
-        val dest = destination ?: return
-        val p = r.project(loc.latitude, loc.longitude, segmentHint)
-        segmentHint = p.segment
-
-        // Hors itinéraire : on recalcule après 3 positions fiables consécutives.
-        if (p.offRoute > OFF_ROUTE_METERS && loc.accuracy < 40) offRouteCount++ else offRouteCount = 0
-        if (offRouteCount >= 3 && !rerouting && System.currentTimeMillis() - lastRerouteAt > 8000) {
-            offRouteCount = 0
-            computeRoute(loc, dest, isReroute = true)
-        }
-
-        stop?.let { st ->
-            if (Geo.distance(loc.latitude, loc.longitude, st.lat, st.lon) < 50) {
-                stop = null
-                say("Vous êtes arrivé à votre étape")
-            }
-        }
-
-        val remaining = (r.totalDistance - p.along).coerceAtLeast(0.0)
-        if (remaining < 30 || Geo.distance(loc.latitude, loc.longitude, dest.lat, dest.lon) < 25) {
-            say("Vous êtes arrivé à destination")
-            stopNavigation()
-            clearRoute()
-            return
-        }
-
-        // Prochaine manœuvre
-        val index = r.maneuvers.indexOfFirst { r.cumulative[it.beginIndex] > p.along + 3 }
-        if (index >= 0) {
-            val man = r.maneuvers[index]
-            val dist = r.cumulative[man.beginIndex] - p.along
+    override fun onProgress(p: Nav.Progress) {
+        p.maneuver?.let { man ->
             maneuverArrow.text = man.arrow
-            maneuverDistance.text = Geo.formatDistance(dist)
+            maneuverDistance.text = Geo.formatDistance(p.maneuverDistance)
             maneuverText.text = man.instruction
-            val speedKmh = if (loc.hasSpeed()) loc.speed * 3.6 else 50.0
-            val farThreshold = if (speedKmh > 90) 1500.0 else 500.0
-            val nearThreshold = (speedKmh / 3.6 * 7).coerceIn(40.0, 250.0)
-            if (dist <= farThreshold && dist > farThreshold * 0.5 && dist > nearThreshold * 2 && spoken.add("m-$index-far")) {
-                say("Dans ${Geo.spokenDistance(dist)}, ${man.verbalAlert ?: man.instruction}")
-            }
-            if (dist <= nearThreshold && spoken.add("m-$index-near")) {
-                say(man.verbalPre ?: man.instruction)
-            }
         }
-
-        // Durée restante : référence (trafic compris si dispo) au prorata de la distance
-        val remainingTime = etaSeconds * remaining / etaDistance
-        val arrival = SimpleDateFormat("HH:mm", Locale.FRANCE).format(Date(System.currentTimeMillis() + (remainingTime * 1000).toLong()))
-        navEta.text = "$arrival · ${Geo.formatDuration(remainingTime)}"
-        val traffic = if (trafficActive() && trafficDelay >= 60) " · bouchons +${Geo.formatDuration(trafficDelay)}" else ""
-        navRemaining.text = "${Geo.formatDistance(remaining)} restants$traffic"
-
-        // Alertes devant soi sur l'itinéraire
-        val ahead = routeAlerts
-            .map { (a, along) -> a to (along - p.along) }
-            .filter { it.second in -10.0..ALERT_AHEAD_METERS }
-            .minByOrNull { it.second }
-        showAlert(ahead?.first, ahead?.second)
+        val arrival = SimpleDateFormat("HH:mm", Locale.FRANCE).format(Date(p.arrivalMillis))
+        navEta.text = "$arrival · ${Geo.formatDuration(p.remainingTime)}"
+        val traffic = if (p.trafficDelay >= 60) " · bouchons +${Geo.formatDuration(p.trafficDelay)}" else ""
+        navRemaining.text = "${Geo.formatDistance(p.remaining)} restants$traffic"
     }
 
-    /** Place les alertes sur l'itinéraire (en arrière-plan : il peut y en avoir des milliers). */
-    private fun computeRouteAlerts() {
-        val r = route ?: run { routeAlerts = emptyList(); return }
-        val alerts = allAlerts().filter { isAnnounced(it) }
-        io.execute {
-            val placed = alerts.mapNotNull { a -> r.projectNear(a.lat, a.lon, 40.0)?.let { a to it.along } }
-            main.post { if (route === r) routeAlerts = placed }
-        }
-    }
-
-    /** Hors guidage : alerte si un danger est proche et devant (selon le cap). */
-    private fun checkFreeDriveAlerts(loc: Location) {
-        val moving = loc.hasSpeed() && loc.speed > 4
-        if (!moving) {
-            showAlert(null, null)
-            return
-        }
-        val dLat = 0.006
-        val candidate = allAlerts()
-            .filter { Math.abs(it.lat - loc.latitude) < dLat && Math.abs(it.lon - loc.longitude) < dLat * 1.6 && isAnnounced(it) }
-            .map { it to Geo.distance(loc.latitude, loc.longitude, it.lat, it.lon) }
-            .filter { (a, d) ->
-                d < FREE_DRIVE_ALERT_METERS && (!loc.hasBearing() ||
-                    Geo.angleDiff(loc.bearing.toDouble(), Geo.bearing(loc.latitude, loc.longitude, a.lat, a.lon)) < 50)
-            }
-            .minByOrNull { it.second }
-        showAlert(candidate?.first, candidate?.second)
-    }
-
-    private fun showAlert(alert: Alert?, distance: Double?) {
+    override fun onAlert(alert: Alert?, distance: Double?) {
         if (alert == null || distance == null) {
             alertBanner.visibility = View.GONE
             return
@@ -1221,62 +988,9 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         alertBanner.setBackgroundResource(R.drawable.bg_alert)
         alertBanner.background.mutate().setTint(Color.parseColor(alert.type.color))
         alertBanner.visibility = View.VISIBLE
-        if (spoken.add("a-${alert.id}")) {
-            val limit = if (alert.detail != null && alert.type != AlertType.BOUCHON) ", limité à ${alert.detail}" else ""
-            val length = if (alert.type == AlertType.BOUCHON && alert.detail != null) " sur ${alert.detail}" else ""
-            say("${alert.type.spoken}$length dans ${Geo.spokenDistance(distance.coerceAtLeast(50.0))}$limit")
-        }
     }
 
     // ---------- Radars, bornes et signalements ----------
-
-    private fun loadOsmForRoute(r: Route) {
-        if (r.points.isEmpty()) return
-        val pad = 0.02
-        val south = r.points.minOf { it[0] } - pad
-        val north = r.points.maxOf { it[0] } + pad
-        val west = r.points.minOf { it[1] } - pad
-        val east = r.points.maxOf { it[1] } + pad
-        // Sans Lufop, on prend les radars OSM sur tout l'itinéraire ; les bornes seulement autour de l'arrivée.
-        try {
-            val found = ArrayList<Alert>()
-            if (lufopStore.all().none { it.type != AlertType.BORNE }) found += Net.osmAlerts(south, west, north, east, chargers = false)
-            if (settings.showChargers) {
-                val end = r.points.last()
-                found += Net.osmAlerts(end[0] - 0.05, end[1] - 0.075, end[0] + 0.05, end[1] + 0.075, chargers = true)
-                    .filter { it.type == AlertType.BORNE }
-            }
-            main.post { mergeOsm(found) }
-        } catch (e: Exception) {
-            main.post { toast("Radars OpenStreetMap indisponibles pour cet itinéraire") }
-        }
-    }
-
-    private fun maybeLoadOsmAround(loc: Location) {
-        val center = osmCenter
-        if (osmLoading) return
-        if (center != null && center.distanceTo(loc) < 5000) return
-        osmLoading = true
-        osmCenter = loc
-        val d = 0.1 // environ 10 km autour
-        val chargers = settings.showChargers
-        io.execute {
-            try {
-                val found = Net.osmAlerts(loc.latitude - d, loc.longitude - d * 1.5, loc.latitude + d, loc.longitude + d * 1.5, chargers)
-                main.post { mergeOsm(found) }
-            } catch (e: Exception) {
-                main.post { osmCenter = null }
-            } finally {
-                main.post { osmLoading = false }
-            }
-        }
-    }
-
-    private fun mergeOsm(found: List<Alert>) {
-        osmAlerts = (osmAlerts + found).distinctBy { it.id }
-        refreshAlertLayer()
-        computeRouteAlerts()
-    }
 
     /** Bases fournies avec l'appli (radars Espagne), importées une seule fois au premier lancement. */
     private fun importBundledRadars() {
@@ -1295,8 +1009,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             }
         }
         if (changed) main.post {
-            refreshAlertLayer()
-            computeRouteAlerts()
+            Nav.alertsChanged()
         }
     }
 
@@ -1326,8 +1039,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
                 val result = lufopStore.import("api-lufop", items)
                 settings.lufopLastUpdate = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
                 main.post {
-                    refreshAlertLayer()
-                    computeRouteAlerts()
+                    Nav.alertsChanged()
                     if (manual) showImportResult("API Lufop", items, result)
                     else if (result.added.isNotEmpty()) toast("Lufop : ${result.added.size} nouveautés radar (menu ☰)")
                 }
@@ -1368,8 +1080,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
                 if (items.isEmpty()) throw IllegalStateException("Aucun point reconnu dans « $fileName ». Formats acceptés : CSV, GPX, KML, OV2 ou ZIP.")
                 val result = lufopStore.import(LufopStore.datasetName(fileName), items)
                 main.post {
-                    refreshAlertLayer()
-                    computeRouteAlerts()
+                    Nav.alertsChanged()
                     showImportResult(fileName, items, result)
                 }
             } catch (e: Exception) {
@@ -1390,9 +1101,8 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         AlertType.reportable.forEach { type ->
             sheet.item(alertIcon(type), type.label, color = pale(type.color)) {
                 val alert = alertStore.add(type, lat, lon)
-                spoken.add("a-${alert.id}") // pas d'annonce pour sa propre alerte
-                refreshAlertLayer()
-                computeRouteAlerts()
+                Nav.markSpoken(alert.id) // pas d'annonce pour sa propre alerte
+                Nav.alertsChanged()
                 toast("${alert.type.label} signalé")
             }
         }
@@ -1908,13 +1618,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         }
     }
 
-    private fun addStop(place: Place) {
-        val loc = lastLocation ?: return
-        val dest = destination ?: return
-        stop = place
-        say("Étape ajoutée")
-        computeRoute(loc, dest, isReroute = true)
-    }
+    private fun addStop(place: Place) = Nav.addStop(place)
 
     // ---------- Menu et réglages ----------
 
@@ -2066,7 +1770,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         fun save() {
             settings.announceRadars = announce.isChecked
             settings.lufopKey = key.text.toString()
-            computeRouteAlerts()
+            Nav.alertsChanged()
         }
         sheet.primary("⬇️  Mettre à jour depuis Lufop") {
             save()
@@ -2089,8 +1793,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
                 Sheet(this).title("Supprimer « $label » ?", "$size points")
                     .primary("Supprimer", "#D93025") {
                         lufopStore.remove(name)
-                        refreshAlertLayer()
-                        computeRouteAlerts()
+                        Nav.alertsChanged()
                         toast("« $label » supprimée")
                     }
                     .secondary("Annuler") {}
@@ -2113,19 +1816,13 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             if (traffic.isChecked != settings.trafficOn) {
                 settings.trafficOn = traffic.isChecked
                 updateTrafficLayer()
-                if (!traffic.isChecked) incidents = emptyMap()
-                lastIncidentsAt = 0
-                periodicRefresh()
+                if (traffic.isChecked) Nav.refreshTrafficNow() else Nav.clearIncidents()
             }
             refreshBrandLayer()
-            osmCenter = null
             brandsCenter = null
-            lastLocation?.let {
-                maybeLoadOsmAround(it)
-                maybeLoadBrandsAround(it)
-            }
-            refreshAlertLayer()
-            computeRouteAlerts()
+            Nav.reloadAround()
+            lastLocation?.let { maybeLoadBrandsAround(it) }
+            Nav.alertsChanged()
         }
         sheet.primary("Terminé") {}
         sheet.show()
@@ -2142,8 +1839,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
             settings.tomtomKey = tomtom.text.toString()
             settings.googleKey = google.text.toString()
             updateTrafficLayer()
-            lastIncidentsAt = 0
-            periodicRefresh()
+            Nav.refreshTrafficNow()
             toast("Clés enregistrées")
         }
         sheet.show()
@@ -2159,16 +1855,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
 
     // ---------- Voix ----------
 
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            tts?.language = Locale.FRANCE
-            ttsReady = true
-        }
-    }
-
-    private fun say(text: String) {
-        if (ttsReady) tts?.speak(text, TextToSpeech.QUEUE_ADD, null, text.hashCode().toString())
-    }
+    private fun say(text: String) = Nav.say(text)
 
     private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_SHORT).show()
 
@@ -2204,9 +1891,8 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     }
 
     override fun onDestroy() {
-        main.removeCallbacks(ticker)
-        (getSystemService(Context.LOCATION_SERVICE) as LocationManager).removeUpdates(this)
-        tts?.shutdown()
+        Nav.removeListener(this)
+        Nav.detach(this)
         io.shutdownNow()
         mapView.onDestroy()
         super.onDestroy()

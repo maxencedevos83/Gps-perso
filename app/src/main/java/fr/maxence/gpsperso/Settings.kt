@@ -37,16 +37,16 @@ class Settings(context: Context) {
 
     /** Clé Lufop : celle saisie dans Réglages, sinon celle fournie à la compilation (secret GitHub LUFOP_KEY). */
     var lufopKey: String
-        get() = prefs.getString("lufop_key", null) ?: BuildConfig.LUFOP_KEY
+        get() = prefs.getString("lufop_key", null)?.takeIf { it.isNotBlank() } ?: BuildConfig.LUFOP_KEY
         set(v) = prefs.edit().putString("lufop_key", v.trim()).apply()
 
     var lufopLastUpdate: String
         get() = prefs.getString("lufop_last_update", "") ?: ""
         set(v) = prefs.edit().putString("lufop_last_update", v).apply()
 
-    /** Clé Google Places (facultative) pour les notes et avis des restaurants. */
+    /** Clé Google Places (facultative) : celle saisie dans Réglages, sinon le secret GitHub GOOGLE_KEY. */
     var googleKey: String
-        get() = prefs.getString("google_key", "") ?: ""
+        get() = prefs.getString("google_key", null)?.takeIf { it.isNotBlank() } ?: BuildConfig.GOOGLE_KEY
         set(v) = prefs.edit().putString("google_key", v.trim()).apply()
 
     /** Adresse de la maison (bouton 🏠). */

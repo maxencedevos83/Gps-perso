@@ -17,6 +17,7 @@ android {
         versionName = "0.1.$buildNumber"
         // Clé Lufop injectée depuis le secret GitHub LUFOP_KEY (jamais écrite dans le code)
         buildConfigField("String", "LUFOP_KEY", "\"${System.getenv("LUFOP_KEY") ?: ""}\"")
+        buildConfigField("String", "GOOGLE_KEY", "\"${System.getenv("GOOGLE_KEY") ?: ""}\"")
     }
 
     buildFeatures {
@@ -58,4 +59,7 @@ kotlin {
 
 dependencies {
     implementation("org.maplibre.gl:android-sdk:13.7.1")
+    // Android Auto (Car App Library)
+    implementation("androidx.car.app:app:1.4.0")
+    implementation("androidx.core:core:1.13.1")
 }

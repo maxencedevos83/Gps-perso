@@ -33,6 +33,7 @@ jobs:
       - name: Compiler
         env:
           LUFOP_KEY: ${{ secrets.LUFOP_KEY }}
+          GOOGLE_KEY: ${{ secrets.GOOGLE_KEY }}
         run: ./gradlew assembleRelease --stacktrace
       - name: Renommer l'APK
         run: cp app/build/outputs/apk/release/app-release.apk gps-perso.apk
