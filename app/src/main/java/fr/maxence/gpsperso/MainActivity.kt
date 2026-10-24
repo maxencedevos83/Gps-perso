@@ -1834,6 +1834,12 @@ class MainActivity : Activity(), Nav.Listener {
         sheet.item("✨", "Voix naturelles Google", (if (!phone) "✓ " else "") + if (settings.hasGoogle) settings.googleVoice.removePrefix("fr-FR-") else "Clé Google nécessaire", if (!phone) "#D2E3FC" else "#F1F3F4") {
             if (!settings.hasGoogle) showKeySettings() else showGoogleVoices()
         }
+        if (settings.hasGoogle) sheet.item("🩺", "Tester la voix Google", "Vérifie chaque étape et dit où ça bloque", "#F1F3F4") {
+            toast("Test en cours…")
+            Voice.diagnose { report ->
+                Sheet(this).title("🩺  Test de la voix Google").text(report).secondary("Fermer") {}.show()
+            }
+        }
         Voice.lastCloudError?.let { sheet.text("Dernière erreur Google : ${googleErrorLabel(Exception(it))}", "#D93025", 13f) }
         sheet.sectionTitle("Réglage")
         val rates = listOf(0.85f to "Lente", 1f to "Normale", 1.15f to "Rapide", 1.3f to "Très rapide")

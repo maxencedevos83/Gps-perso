@@ -207,7 +207,9 @@ object Voice : TextToSpeech.OnInitListener {
             file.setLastModified(System.currentTimeMillis())
             return file
         }
-        val audioConfig = JSONObject().put("audioEncoding", "MP3").put("speakingRate", rate.toDouble())
+        val audioConfig = JSONObject().put("audioEncoding", "MP3")
+        // Certaines voix (Chirp) refusent les réglages : on ne les envoie que s'ils sont modifiés.
+        if (rate != 1f) audioConfig.put("speakingRate", rate.toDouble())
         // Les voix Chirp ne gèrent pas la hauteur
         if ("Chirp" !in voice && pitch != 1f) audioConfig.put("pitch", ((pitch - 1f) * 10f).toDouble())
         val body = JSONObject()
@@ -218,10 +220,50 @@ object Voice : TextToSpeech.OnInitListener {
             "https://texttospeech.googleapis.com/v1/text:synthesize", body.toString(),
             headers = mapOf("X-Goog-Api-Key" to key),
         ))
-        file.writeBytes(Base64.decode(json.getString("audioContent"), Base64.DEFAULT))
+        val audio = Base64.decode(json.optString("audioContent"), Base64.DEFAULT)
+        if (audio.size < 200) throw IllegalStateException("réponse audio vide de Google")
+        file.writeBytes(audio)
         // On garde les 400 annonces les plus récentes
         dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(400)?.forEach { it.delete() }
         return file
+    }
+
+    /** Test pas à pas de la voix Google, résultat lisible pour l'utilisateur. */
+    fun diagnose(done: (String) -> Unit) {
+        val key = settings.googleKey
+        val voice = settings.googleVoice
+        val rate = settings.ttsRate
+        val pitch = settings.ttsPitch
+        val lines = ArrayList<String>()
+        lines += if (settings.voiceSource == "google") "✅ Voix Google sélectionnée" else "❌ La voix du téléphone est sélectionnée : choisissez une voix dans « Voix naturelles Google »"
+        lines += if (key.isNotBlank()) "✅ Clé Google présente" else "❌ Clé Google absente"
+        cloudIo.execute {
+            var file: File? = null
+            try {
+                val voices = cloudVoices(key)
+                lines += "✅ Liste des voix : ${voices.size} voix françaises"
+                if (voices.none { it.name == voice }) lines += "⚠️ La voix « $voice » n'existe plus chez Google : choisissez-en une autre"
+            } catch (e: Exception) {
+                lines += "❌ Liste des voix : ${e.message}"
+            }
+            try {
+                File(app.cacheDir, "voix").listFiles()?.forEach { it.delete() }
+                file = cloudFile(key, voice, rate, pitch, "Test de la voix Google. Radar fixe dans 500 mètres.")
+                lines += "✅ Synthèse avec $voice : ${file.length() / 1024} Ko reçus"
+            } catch (e: Exception) {
+                lines += "❌ Synthèse avec $voice : ${e.message}"
+            }
+            main.post {
+                val f = file
+                if (f != null) {
+                    requestFocus()
+                    queue.add(f)
+                    if (player == null) playNext()
+                    lines += "🔊 Lecture lancée : vous devez entendre la voix Google maintenant"
+                }
+                done(lines.joinToString("\n"))
+            }
+        }
     }
 
     private fun playNext() {
@@ -237,12 +279,17 @@ object Voice : TextToSpeech.OnInitListener {
             p.setAudioAttributes(attributes)
             p.setDataSource(f.absolutePath)
             p.setOnCompletionListener { it.release(); player = null; playNext() }
-            p.setOnErrorListener { mp, _, _ -> mp.release(); player = null; playNext(); true }
+            p.setOnErrorListener { mp, what, extra ->
+                mp.release(); player = null
+                onCloudError?.invoke("lecture audio impossible ($what/$extra)")
+                playNext(); true
+            }
             p.prepare()
             p.start()
         } catch (e: Exception) {
             p.release()
             player = null
+            onCloudError?.invoke("lecture audio impossible : ${e.message}")
             playNext()
         }
     }
