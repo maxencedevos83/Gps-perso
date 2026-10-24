@@ -54,6 +54,8 @@ object Nav : LocationListener {
         fun onMessage(text: String) {}
         fun onSpeedLimit(limit: Int?) {}
         fun onAltitude(meters: Int?) {}
+        fun onWeather(warnings: List<Weather.Warning>) {}
+        fun onParkingChanged() {}
     }
 
     private lateinit var app: Context
@@ -109,9 +111,17 @@ object Nav : LocationListener {
     /** Alertes situées sur l'itinéraire, avec leur position (m) depuis le départ. */
     private var routeAlerts: List<Pair<Alert, Double>> = emptyList()
 
+    /** Événements Bison Futé (routes nationales et autoroutes). */
+    private var bisonAlerts: List<Alert> = emptyList()
+    private var bisonAt = 0L
+    private var bisonLoading = false
+    /** Météo prévue sur le trajet. */
+    var weatherWarnings: List<Weather.Warning> = emptyList(); private set
+
     private val ticker = object : Runnable {
         override fun run() {
             periodicRefresh()
+            maybeLoadBisonFute()
             main.postDelayed(this, 60_000)
         }
     }
@@ -142,6 +152,7 @@ object Nav : LocationListener {
     fun attach(owner: Any) {
         owners.add(owner)
         startLocation()
+        maybeLoadBisonFute()
     }
 
     /** Plus personne n'affiche la carte : on coupe le GPS, sauf pendant un guidage. */
@@ -227,6 +238,8 @@ object Nav : LocationListener {
             try {
                 val r = Net.route(from.latitude, from.longitude, to.lat, to.lon, heading, via)
                 main.post { if (destination === to) onRouteReady(r, isReroute) }
+                try { Net.addLanes(r, from.latitude, from.longitude, to.lat, to.lon, heading, via) } catch (e: Exception) { }
+                if (!isReroute) loadWeather(r)
                 loadOsmForRoute(r)
             } catch (e: Exception) {
                 main.post {
@@ -271,6 +284,7 @@ object Nav : LocationListener {
         startWhenReady = false
         routeAlerts = emptyList()
         lastProgress = null
+        weatherWarnings = emptyList()
         emit { it.onRouteCleared() }
     }
 
@@ -285,6 +299,7 @@ object Nav : LocationListener {
         NavService.start(app)
         emit { it.onNavigationStarted() }
         r.maneuvers.firstOrNull()?.let { say(it.verbalPre ?: it.instruction) }
+        weatherWarnings.firstOrNull()?.let { say("Météo : ${it.text} sur le trajet, vers ${it.place}") }
         lastLocation?.let { updateNavigation(it) }
     }
 
@@ -322,6 +337,7 @@ object Nav : LocationListener {
         val remaining = (r.totalDistance - p.along).coerceAtLeast(0.0)
         if (remaining < 30 || Geo.distance(loc.latitude, loc.longitude, dest.lat, dest.lon) < 25) {
             say("Vous êtes arrivé à destination")
+            saveParking(loc.latitude, loc.longitude)
             clearRoute()
             return
         }
@@ -389,7 +405,12 @@ object Nav : LocationListener {
         if (spoken.add("a-${alert.id}")) {
             val limit = if (alert.detail != null && alert.type != AlertType.BOUCHON) ", limité à ${alert.detail}" else ""
             val length = if (alert.type == AlertType.BOUCHON && alert.detail != null) " sur ${alert.detail}" else ""
-            val what = if (alert.description?.contains("zone de danger", ignoreCase = true) == true) "Zone de danger" else alert.type.spoken
+            val what = when {
+                alert.description?.contains("zone de danger", ignoreCase = true) == true -> "Zone de danger"
+                alert.source == "bisonfute" || alert.source == "here" ->
+                    alert.description?.lineSequence()?.firstOrNull()?.substringBefore(" ·")?.ifBlank { null } ?: alert.type.spoken
+                else -> alert.type.spoken
+            }
             say("$what$length dans ${Geo.spokenDistance(distance.coerceAtLeast(50.0))}$limit", Voice.Kind.ALERT)
         }
     }
@@ -404,7 +425,8 @@ object Nav : LocationListener {
         val lufop = lufopStore.all()
         val hasImportedRadars = lufop.any { it.type != AlertType.BORNE }
         val osm = osmAlerts.filter { it.type == AlertType.BORNE || !hasImportedRadars }
-        return (lufop + osm + incidents.values + alertStore.all())
+        val bison = if (settings.showBisonFute) bisonAlerts else emptyList()
+        return (lufop + osm + incidents.values + bison + alertStore.all())
             .filter { it.type != AlertType.BORNE || settings.showChargers }
     }
 
@@ -485,7 +507,7 @@ object Nav : LocationListener {
 
     // ---------- Trafic TomTom ----------
 
-    fun trafficActive() = settings.trafficOn && settings.hasTomTom
+    fun trafficActive() = settings.trafficOn && (settings.hasTomTom || settings.hasHere)
 
     /** Trafic coupé : on oublie les incidents. */
     fun clearIncidents() {
@@ -504,14 +526,20 @@ object Nav : LocationListener {
         if (!trafficActive() || boxes.isEmpty()) return
         lastIncidentsAt = System.currentTimeMillis()
         val key = settings.tomtomKey
+        val hereKey = settings.hereKey
         io.execute {
             val found = ArrayList<Alert>()
             var error: String? = null
             for (b in boxes) {
-                try {
+                if (key.isNotBlank()) try {
                     found += TomTom.incidents(key, b[0], b[1], b[2], b[3])
                 } catch (e: Exception) {
                     error = e.message
+                }
+                if (hereKey.isNotBlank()) try {
+                    found += Here.incidents(hereKey, b[0], b[1], b[2], b[3])
+                } catch (e: Exception) {
+                    error = "HERE : " + e.message
                 }
             }
             main.post {
@@ -525,7 +553,7 @@ object Nav : LocationListener {
     private fun refreshEta(from: Location) {
         val dest = destination ?: return
         val r = route ?: return
-        if (!trafficActive()) return
+        if (!trafficActive() || !settings.hasTomTom) return
         lastEtaAt = System.currentTimeMillis()
         val key = settings.tomtomKey
         val viaStop = stop
@@ -566,6 +594,57 @@ object Nav : LocationListener {
                 loadIncidents(listOf(doubleArrayOf(loc.latitude - 0.3, loc.longitude - 0.45, loc.latitude + 0.3, loc.longitude + 0.45)))
             }
         }
+    }
+
+    // ---------- Bison Futé, météo, parking ----------
+
+    /** Bison Futé : le fichier national est rechargé toutes les 20 minutes quand l'appli sert. */
+    fun maybeLoadBisonFute(force: Boolean = false) {
+        if (!settings.showBisonFute || bisonLoading) return
+        if (!force && System.currentTimeMillis() - bisonAt < 20 * 60_000) return
+        if (!force && owners.isEmpty() && !navigating) return
+        bisonLoading = true
+        io.execute {
+            val found = try { BisonFute.download() } catch (e: Exception) { null }
+            main.post {
+                bisonLoading = false
+                if (found != null) {
+                    bisonAt = System.currentTimeMillis()
+                    bisonAlerts = found
+                    alertsChanged()
+                }
+            }
+        }
+    }
+
+    private fun loadWeather(r: Route) {
+        if (!settings.showWeather) return
+        try {
+            val warnings = Weather.alongRoute(r, System.currentTimeMillis()) { lat, lon ->
+                try { Net.reverse(lat, lon)?.split(",")?.lastOrNull { it.isNotBlank() }?.trim() } catch (e: Exception) { null } ?: "sur le trajet"
+            }
+            main.post {
+                if (route !== r && route != null) return@post
+                weatherWarnings = warnings
+                emit { it.onWeather(warnings) }
+                if (navigating && warnings.isNotEmpty()) say("Météo : ${warnings.first().text} sur le trajet")
+            }
+        } catch (e: Exception) {
+            // météo facultative
+        }
+    }
+
+    fun saveParking(lat: Double, lon: Double) {
+        settings.parkLat = lat
+        settings.parkLon = lon
+        settings.parkTime = System.currentTimeMillis()
+        emit { it.onParkingChanged() }
+    }
+
+    fun clearParking() {
+        settings.parkLat = Double.NaN
+        settings.parkLon = Double.NaN
+        emit { it.onParkingChanged() }
     }
 
     // ---------- Altitude ----------

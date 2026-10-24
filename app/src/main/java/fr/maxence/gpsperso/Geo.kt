@@ -102,7 +102,12 @@ class Maneuver(
     val verbalAlert: String?,
     val verbalPre: String?,
     val beginIndex: Int,
+    /** Panneau de sortie : « Sortie 12 · Marseille ». */
+    val sign: String? = null,
 ) {
+    /** Voies à l'approche de la manœuvre (rempli après coup, si connu). */
+    @Volatile var lanes: List<Lane>? = null
+
     /** Flèche affichée dans le bandeau, d'après les types de manœuvre Valhalla. */
     val arrow: String
         get() = when (type) {
@@ -117,6 +122,25 @@ class Maneuver(
             4, 5, 6 -> "⚑"
             else -> "↑"
         }
+}
+
+/** Une voie de circulation : flèches peintes au sol et si elle mène à la bonne direction. */
+class Lane(val indications: List<String>, val valid: Boolean) {
+    /** Flèche principale de la voie (celle à suivre si la voie est conseillée). */
+    fun arrow(preferred: String? = null): String = laneArrow(preferred?.takeIf { it in indications } ?: indications.firstOrNull() ?: "straight")
+
+    companion object {
+        fun laneArrow(i: String) = when (i) {
+            "slight right" -> "↗"
+            "right" -> "→"
+            "sharp right" -> "↘"
+            "slight left" -> "↖"
+            "left" -> "←"
+            "sharp left" -> "↙"
+            "uturn" -> "↶"
+            else -> "↑"
+        }
+    }
 }
 
 class Projection(val segment: Int, val along: Double, val offRoute: Double)

@@ -97,6 +97,39 @@ class Settings(context: Context) {
         get() = prefs.getInt("seen_version", 0)
         set(v) = prefs.edit().putInt("seen_version", v).apply()
 
+    /** Clé HERE (facultative) : deuxième source d'incidents de trafic. */
+    var hereKey: String
+        get() = prefs.getString("here_key", "") ?: ""
+        set(v) = prefs.edit().putString("here_key", v.trim()).apply()
+
+    var showBisonFute: Boolean
+        get() = prefs.getBoolean("show_bison_fute", true)
+        set(v) = prefs.edit().putBoolean("show_bison_fute", v).apply()
+
+    var showWeather: Boolean
+        get() = prefs.getBoolean("show_weather", true)
+        set(v) = prefs.edit().putBoolean("show_weather", v).apply()
+
+    /** Mode nuit : "auto" (selon le soleil), "on", "off". */
+    var nightMode: String
+        get() = prefs.getString("night_mode", "auto") ?: "auto"
+        set(v) = prefs.edit().putString("night_mode", v).apply()
+
+    var parkLat: Double
+        get() = prefs.getString("park_lat", "")?.toDoubleOrNull() ?: Double.NaN
+        set(v) = prefs.edit().putString("park_lat", v.toString()).apply()
+
+    var parkLon: Double
+        get() = prefs.getString("park_lon", "")?.toDoubleOrNull() ?: Double.NaN
+        set(v) = prefs.edit().putString("park_lon", v.toString()).apply()
+
+    var parkTime: Long
+        get() = prefs.getLong("park_time", 0)
+        set(v) = prefs.edit().putLong("park_time", v).apply()
+
+    val hasParking: Boolean get() = !parkLat.isNaN() && !parkLon.isNaN()
+    val hasHere: Boolean get() = hereKey.isNotBlank()
+
     val hasHome: Boolean get() = !homeLat.isNaN() && !homeLon.isNaN()
     val hasLufop: Boolean get() = lufopKey.isNotBlank()
     val hasGoogle: Boolean get() = googleKey.isNotBlank()

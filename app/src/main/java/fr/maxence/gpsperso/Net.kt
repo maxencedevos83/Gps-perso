@@ -157,11 +157,60 @@ object Net {
                         verbalAlert = m.optString("verbal_transition_alert_instruction").ifBlank { null },
                         verbalPre = m.optString("verbal_pre_transition_instruction").ifBlank { null },
                         beginIndex = (m.optInt("begin_shape_index") + offset).coerceIn(0, (points.size - 1).coerceAtLeast(0)),
+                        sign = m.optJSONObject("sign")?.let { signText(it) },
                     )
                 )
             }
         }
         return Route(points, maneuvers, trip.getJSONObject("summary").optDouble("time", 0.0))
+    }
+
+    private fun signText(sign: JSONObject): String? {
+        fun texts(key: String) = sign.optJSONArray(key)?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it)?.optString("text")?.ifBlank { null } } }.orEmpty()
+        val exit = texts("exit_number_elements").firstOrNull()?.let { "Sortie $it" }
+        val toward = (texts("exit_toward_elements") + texts("exit_branch_elements")).distinct().take(2).joinToString(", ").ifBlank { null }
+        return listOfNotNull(exit, toward).joinToString(" · ").ifBlank { null }
+    }
+
+    /**
+     * Voies conseillées : même trajet demandé au format OSRM, qui contient les voies aux carrefours.
+     * Elles sont rattachées aux manœuvres par leur position. Facultatif : en cas d'échec, pas de voies.
+     */
+    fun addLanes(r: Route, fromLat: Double, fromLon: Double, toLat: Double, toLon: Double, heading: Float?, via: List<Place>) {
+        val origin = JSONObject().put("lat", fromLat).put("lon", fromLon)
+        if (heading != null) origin.put("heading", heading.toInt()).put("heading_tolerance", 45)
+        val locations = JSONArray().put(origin)
+        via.forEach { locations.put(JSONObject().put("lat", it.lat).put("lon", it.lon)) }
+        locations.put(JSONObject().put("lat", toLat).put("lon", toLon))
+        val body = JSONObject()
+            .put("locations", locations)
+            .put("costing", "auto")
+            .put("format", "osrm")
+            .put("directions_options", JSONObject().put("language", "fr-FR").put("units", "kilometers"))
+        val json = JSONObject(request(VALHALLA, body.toString()))
+        val legs = json.getJSONArray("routes").getJSONObject(0).getJSONArray("legs")
+        val found = ArrayList<Pair<DoubleArray, List<Lane>>>()
+        for (l in 0 until legs.length()) {
+            val steps = legs.getJSONObject(l).getJSONArray("steps")
+            for (s in 0 until steps.length()) {
+                val inters = steps.getJSONObject(s).optJSONArray("intersections") ?: continue
+                for (i in 0 until inters.length()) {
+                    val it = inters.getJSONObject(i)
+                    val lanes = it.optJSONArray("lanes") ?: continue
+                    val loc = it.getJSONArray("location")
+                    val list = (0 until lanes.length()).map { k ->
+                        val lane = lanes.getJSONObject(k)
+                        val ind = lane.optJSONArray("indications")
+                        Lane((0 until (ind?.length() ?: 0)).map { ind!!.getString(it) }, lane.optBoolean("valid") || lane.optBoolean("active"))
+                    }
+                    if (list.size >= 2 && list.any { it.valid } && list.any { !it.valid }) found += doubleArrayOf(loc.getDouble(1), loc.getDouble(0)) to list
+                }
+            }
+        }
+        for (m in r.maneuvers) {
+            val p = r.points.getOrNull(m.beginIndex) ?: continue
+            m.lanes = found.firstOrNull { Geo.distance(p[0], p[1], it.first[0], it.first[1]) < 15 }?.second
+        }
     }
 
     /**
