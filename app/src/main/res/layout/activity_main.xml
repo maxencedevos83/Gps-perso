@@ -159,7 +159,24 @@
             android:paddingEnd="12dp"
             android:paddingBottom="12dp">
 
+            <!-- Panneau de limitation de vitesse de la route actuelle (OpenStreetMap) -->
+            <TextView
+                android:id="@+id/speedLimit"
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:layout_gravity="bottom|start"
+                android:layout_marginStart="4dp"
+                android:layout_marginBottom="74dp"
+                android:background="@drawable/bg_limit"
+                android:elevation="4dp"
+                android:gravity="center"
+                android:textColor="#202124"
+                android:textSize="20sp"
+                android:textStyle="bold"
+                android:visibility="gone" />
+
             <LinearLayout
+                android:id="@+id/speedBox"
                 android:layout_width="64dp"
                 android:layout_height="64dp"
                 android:layout_gravity="bottom|start"

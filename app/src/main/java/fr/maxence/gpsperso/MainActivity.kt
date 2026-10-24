@@ -130,6 +130,13 @@ class MainActivity : Activity(), Nav.Listener {
         setContentView(R.layout.activity_main)
         Nav.init(this)
         Nav.addListener(this)
+        Voice.onCloudError = { msg ->
+            Sheet(this).title("Voix Google indisponible", "L'appli utilise la voix du téléphone en attendant")
+                .text(googleErrorLabel(Exception(msg)).replace("Places API (New)", "Cloud Text-to-Speech API"))
+                .text("Détail : ${msg.take(200)}", "#5F6368", 12f)
+                .secondary("Fermer") {}
+                .show()
+        }
         settings = Nav.settings
         alertStore = Nav.alertStore
         poiStore = Nav.poiStore
@@ -754,7 +761,11 @@ class MainActivity : Activity(), Nav.Listener {
         if (first && locationReady && !navigating) {
             map?.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(loc.latitude, loc.longitude), 14.0))
         }
-        speedText.text = if (loc.hasSpeed()) (loc.speed * 3.6f).toInt().toString() else "0"
+        val kmh = if (loc.hasSpeed()) (loc.speed * 3.6f).toInt() else 0
+        speedText.text = kmh.toString()
+        // Compteur en rouge au-delà de la limite (petite marge pour l'imprécision du GPS)
+        val over = Nav.speedLimit?.let { kmh > it + 3 } == true
+        speedText.setTextColor(Color.parseColor(if (over) "#D93025" else "#202124"))
         maybeLoadBrandsAround(loc)
     }
 
@@ -859,6 +870,14 @@ class MainActivity : Activity(), Nav.Listener {
     override fun onAlertsChanged() = refreshAlertLayer()
 
     override fun onMessage(text: String) = toast(text)
+
+    override fun onSpeedLimit(limit: Int?) {
+        val v = findViewById<TextView>(R.id.speedLimit)
+        if (limit == null) v.visibility = View.GONE else {
+            v.text = limit.toString()
+            v.visibility = View.VISIBLE
+        }
+    }
 
     /** L'appli revient au premier plan (ou la voiture a lancé un trajet) : on remet l'interface à jour. */
     private fun restoreNavigationUi() {
@@ -1909,7 +1928,8 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "🗣️ Choix de la voix : voix du téléphone ou voix naturelles Google (☰ › Réglages › Voix et annonces).\n" +
+                "🚦 Limitation de vitesse de la route au-dessus du compteur (rouge si vous dépassez), aussi dans Android Auto.\n" +
+                    "🗣️ Choix de la voix : voix du téléphone ou voix naturelles Google (☰ › Réglages › Voix et annonces).\n" +
                     "🔊 Bouton sourdine sur la carte : tout, alertes seulement, trajet seulement ou muet.\n" +
                     "ℹ️ Fiches des lieux plus rapides, avec la raison exacte si Google ne répond pas.\n" +
                     "🇫🇷 Radars France intégrés (20 592 points), en plus de l'Espagne.\n" +
@@ -2112,6 +2132,7 @@ class MainActivity : Activity(), Nav.Listener {
 
     override fun onDestroy() {
         Nav.removeListener(this)
+        Voice.onCloudError = null
         Nav.detach(this)
         io.shutdownNow()
         mapView.onDestroy()

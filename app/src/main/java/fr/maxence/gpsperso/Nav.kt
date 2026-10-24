@@ -52,6 +52,7 @@ object Nav : LocationListener {
         fun onAlertsChanged() {}
         fun onEtaChanged() {}
         fun onMessage(text: String) {}
+        fun onSpeedLimit(limit: Int?) {}
     }
 
     private lateinit var app: Context
@@ -69,6 +70,8 @@ object Nav : LocationListener {
 
 
     var lastLocation: Location? = null; private set
+    /** Vitesse maximale de la route actuelle (km/h), si connue. */
+    var speedLimit: Int? = null; private set
     var destination: Place? = null; private set
     /** Étape facultative (station, resto) avant la destination. */
     var stop: Place? = null; private set
@@ -171,6 +174,11 @@ object Nav : LocationListener {
         ) return
         val first = previous == null
         lastLocation = location
+        val limit = SpeedLimit.update(location)
+        if (limit != speedLimit) {
+            speedLimit = limit
+            emit { it.onSpeedLimit(limit) }
+        }
         emit { it.onLocation(location, first) }
         if (navigating) updateNavigation(location) else checkFreeDriveAlerts(location)
         maybeLoadOsmAround(location)

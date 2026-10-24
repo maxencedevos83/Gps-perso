@@ -53,6 +53,9 @@ object Voice : TextToSpeech.OnInitListener {
     private var player: MediaPlayer? = null
     /** Dernière erreur de la voix Google (affichée dans les réglages). */
     var lastCloudError: String? = null; private set
+    /** Prévient l'écran (au plus une fois par minute) quand Google refuse de parler. */
+    var onCloudError: ((String) -> Unit)? = null
+    private var lastErrorShownAt = 0L
 
     private val attributes: AudioAttributes = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
@@ -184,6 +187,11 @@ object Voice : TextToSpeech.OnInitListener {
                 main.post {
                     lastCloudError = e.message
                     deviceSay(text)
+                    val now = System.currentTimeMillis()
+                    if (now - lastErrorShownAt > 60_000) {
+                        lastErrorShownAt = now
+                        onCloudError?.invoke(e.message ?: "erreur inconnue")
+                    }
                 }
             }
         }

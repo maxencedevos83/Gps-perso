@@ -58,6 +58,7 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
     private var locationReady = false
     private var alertView: TextView? = null
     private var speedView: TextView? = null
+    private var limitView: TextView? = null
     private var width = 0
     private var height = 0
     private var visible = Rect()
@@ -113,6 +114,19 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
             }
         }
         root.addView(speedView, FrameLayout.LayoutParams(dp(64), dp(64)))
+        limitView = TextView(ctx).apply {
+            textSize = 20f
+            gravity = Gravity.CENTER
+            setTextColor(Color.parseColor("#202124"))
+            setTypeface(typeface, Typeface.BOLD)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.WHITE)
+                setStroke(dp(6), Color.parseColor("#D93025"))
+            }
+            visibility = View.GONE
+        }
+        root.addView(limitView, FrameLayout.LayoutParams(dp(56), dp(56)))
         layoutOverlays()
 
         pres.setContentView(root)
@@ -140,6 +154,7 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
         }
         Nav.addListener(this)
         Nav.lastLocation?.let { updateSpeed(it) }
+        onSpeedLimit(Nav.speedLimit)
         Nav.currentAlert?.let { onAlert(it.first, it.second) }
     }
 
@@ -248,7 +263,18 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
     private fun dp(v: Int) = (v * density).toInt()
 
     private fun updateSpeed(loc: Location) {
-        speedView?.text = if (loc.hasSpeed()) (loc.speed * 3.6f).toInt().toString() else "0"
+        val kmh = if (loc.hasSpeed()) (loc.speed * 3.6f).toInt() else 0
+        speedView?.text = kmh.toString()
+        val over = Nav.speedLimit?.let { kmh > it + 3 } == true
+        speedView?.setTextColor(Color.parseColor(if (over) "#D93025" else "#202124"))
+    }
+
+    override fun onSpeedLimit(limit: Int?) {
+        val v = limitView ?: return
+        if (limit == null) v.visibility = View.GONE else {
+            v.text = limit.toString()
+            v.visibility = View.VISIBLE
+        }
     }
 
     /** Pastilles d'alerte et de vitesse dans la zone laissée libre par Android Auto. */
@@ -264,6 +290,12 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
             leftMargin = visible.left + margin
             topMargin = (visible.bottom - margin - dp(64)).coerceAtLeast(0)
         }
+        limitView?.layoutParams = (limitView?.layoutParams as? FrameLayout.LayoutParams)?.apply {
+            gravity = Gravity.TOP or Gravity.START
+            leftMargin = visible.left + margin + dp(4)
+            topMargin = (visible.bottom - margin - dp(64) - dp(64)).coerceAtLeast(0)
+        }
+        limitView?.requestLayout()
         alertView?.requestLayout()
         speedView?.requestLayout()
     }
