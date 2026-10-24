@@ -24,6 +24,8 @@ data class NearbyPlace(
     val updated: String? = null,
     /** Ville (stations) pour le titre. */
     val city: String? = null,
+    /** Classe du lieu sur le fond de carte (restaurant, aerodrome, shop...). */
+    val category: String? = null,
 ) {
     fun toPlace() = Place(name, detail ?: "", lat, lon)
 }
@@ -219,19 +221,24 @@ object Nearby {
         val body = JSONObject()
             .put("textQuery", name)
             .put("languageCode", "fr")
-            .put("maxResultCount", 1)
+            .put("maxResultCount", 5)
             .put("locationBias", JSONObject().put("circle", JSONObject()
                 .put("center", JSONObject().put("latitude", lat).put("longitude", lon))
-                .put("radius", 300.0)))
+                .put("radius", 2000.0)))
         val fields = "places.displayName,places.rating,places.userRatingCount,places.nationalPhoneNumber," +
             "places.websiteUri,places.currentOpeningHours,places.priceLevel,places.googleMapsUri,places.formattedAddress,places.location"
         val json = JSONObject(Net.request(
             "https://places.googleapis.com/v1/places:searchText", body.toString(),
             headers = mapOf("X-Goog-Api-Key" to key, "X-Goog-FieldMask" to fields),
         ))
-        val p = json.optJSONArray("places")?.optJSONObject(0) ?: return null
-        val loc = p.optJSONObject("location")
-        if (loc != null && Geo.distance(lat, lon, loc.optDouble("latitude"), loc.optDouble("longitude")) > 500) return null
+        // Bon résultat : nom proche et pas trop loin (un aéroport ou un centre commercial est vaste).
+        val places = json.optJSONArray("places") ?: return null
+        val p = (0 until places.length()).map { places.getJSONObject(it) }.mapNotNull { pl ->
+            val loc = pl.optJSONObject("location")
+            val dist = if (loc == null) 0.0 else Geo.distance(lat, lon, loc.optDouble("latitude"), loc.optDouble("longitude"))
+            val similar = similarNames(name, pl.optJSONObject("displayName")?.optString("text") ?: "")
+            if (dist > (if (similar) 4000.0 else 300.0)) null else Triple(pl, similar, dist)
+        }.sortedWith(compareBy({ !it.second }, { it.third })).firstOrNull()?.first ?: return null
         val hours = p.optJSONObject("currentOpeningHours")
         val days = hours?.optJSONArray("weekdayDescriptions")
         return GoogleInfo(
@@ -252,6 +259,16 @@ object Nearby {
             address = p.optString("formattedAddress").ifBlank { null },
         )
     }
+}
+
+/** Deux noms désignent-ils le même lieu ? (mots significatifs en commun) */
+private fun similarNames(a: String, b: String): Boolean {
+    fun words(s: String) = java.text.Normalizer.normalize(s.lowercase(Locale.FRANCE), java.text.Normalizer.Form.NFD)
+        .replace(Regex("\\p{M}"), "").split(Regex("[^a-z0-9]+")).filter { it.length > 2 && it !in setOf("les", "des", "aux", "the") }.toSet()
+    val wa = words(a)
+    val wb = words(b)
+    if (wa.isEmpty() || wb.isEmpty()) return false
+    return wa.intersect(wb).size.toDouble() / minOf(wa.size, wb.size) >= 0.5
 }
 
 class PlaceInfo(

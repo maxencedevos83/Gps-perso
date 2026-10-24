@@ -560,6 +560,7 @@ class MainActivity : Activity(), Nav.Listener {
             lon = p.longitude(),
             detail = placeTypeLabel(subclass ?: cls),
             brand = brand,
+            category = cls,
         )
         if (kind == NearbyKind.STATION) showStationCard(place) else showPlaceCard(place)
         return true
@@ -1457,7 +1458,15 @@ class MainActivity : Activity(), Nav.Listener {
     /** Fiche d'un lieu : nom, infos détaillées (téléphone, horaires, note), gros bouton pour s'y rendre. */
     private fun showPlaceCard(n: NearbyPlace) {
         if (n.kind == NearbyKind.STATION) { showStationCard(n); return }
-        val icon = when (n.brand) { "mcdo" -> "🍟"; "bk" -> "👑"; else -> "🍽️" }
+        val icon = when {
+            n.brand == "mcdo" -> "🍟"
+            n.brand == "bk" -> "👑"
+            n.category == null || n.category in setOf("restaurant", "fast_food", "cafe", "bar", "pub", "food_court", "ice_cream") -> "🍽️"
+            n.category in setOf("aerodrome", "aeroway", "airport") -> "✈️"
+            n.category in setOf("shop", "grocery", "clothing_store", "supermarket") -> "🛍️"
+            n.category in setOf("lodging", "hotel") -> "🏨"
+            else -> "📍"
+        }
         val sheet = Sheet(this).title("$icon  ${n.name}", listOfNotNull(n.detail, distanceLabel(n.lat, n.lon)).joinToString(" · "))
         val infoBox = sheet.slot()
         val loading = TextView(this).apply {
