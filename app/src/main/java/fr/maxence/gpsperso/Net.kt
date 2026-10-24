@@ -32,11 +32,12 @@ object Net {
         body: String? = null,
         contentType: String = "application/json",
         headers: Map<String, String> = emptyMap(),
+        timeoutMs: Int = 30_000,
     ): String {
         val conn = URL(url).openConnection() as HttpURLConnection
         try {
-            conn.connectTimeout = 15_000
-            conn.readTimeout = 30_000
+            conn.connectTimeout = minOf(15_000, timeoutMs)
+            conn.readTimeout = timeoutMs
             conn.setRequestProperty("User-Agent", USER_AGENT)
             conn.setRequestProperty("Accept", "application/json")
             headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
@@ -71,6 +72,22 @@ object Net {
             }
         }
         throw IOException("Serveurs OpenStreetMap indisponibles, réessayez dans un instant (${lastError?.message?.take(60)})")
+    }
+
+    /**
+     * Petite requête Overpass pour une fiche lieu : sans attendre les grosses requêtes en cours,
+     * délai court, et on tente le serveur suivant si le premier traîne.
+     */
+    fun overpassQuick(query: String): JSONObject {
+        var lastError: Exception? = null
+        for (server in OVERPASS_SERVERS) {
+            try {
+                return JSONObject(request(server, "data=${enc(query)}", "application/x-www-form-urlencoded", timeoutMs = 7_000))
+            } catch (e: Exception) {
+                lastError = e
+            }
+        }
+        throw IOException("OpenStreetMap indisponible (${lastError?.message?.take(60)})")
     }
 
     fun enc(s: String) = URLEncoder.encode(s, "UTF-8")

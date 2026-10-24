@@ -34,8 +34,8 @@ object Nearby {
 
     val fuels = listOf("gazole" to "Gazole", "sp95" to "SP95", "e10" to "SP95-E10", "sp98" to "SP98", "e85" to "E85", "gplc" to "GPLc")
 
-    private fun overpass(query: String): List<JSONObject> {
-        val json = Net.overpass(query)
+    private fun overpass(query: String, quick: Boolean = false): List<JSONObject> {
+        val json = if (quick) Net.overpassQuick(query) else Net.overpass(query)
         val elements = json.getJSONArray("elements")
         return (0 until elements.length()).map { elements.getJSONObject(it) }
     }
@@ -165,8 +165,8 @@ object Nearby {
 
     /** Infos OpenStreetMap d'un lieu : téléphone, site, horaires, cuisine, adresse. */
     fun osmDetails(name: String, lat: Double, lon: Double): PlaceInfo? {
-        val query = "[out:json][timeout:15];nwr(around:80,$lat,$lon)[\"name\"];out tags center 30;"
-        val candidates = overpass(query).mapNotNull { e ->
+        val query = "[out:json][timeout:10];nwr(around:80,$lat,$lon)[\"name\"];out tags center 30;"
+        val candidates = overpass(query, quick = true).mapNotNull { e ->
             val tags = e.optJSONObject("tags") ?: return@mapNotNull null
             val (la, lo) = coords(e) ?: return@mapNotNull null
             Triple(tags, Geo.distance(lat, lon, la, lo), tags.optString("name"))

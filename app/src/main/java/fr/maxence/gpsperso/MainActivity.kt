@@ -173,6 +173,7 @@ class MainActivity : Activity(), Nav.Listener {
         }
         val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         if (settings.hasLufop && settings.lufopLastUpdate != today) updateFromLufopApi(manual = false)
+        if (settings.seenVersion != BuildConfig.VERSION_CODE) main.postDelayed({ showHelp() }, 1500)
     }
 
     private fun bindViews() {
@@ -217,6 +218,8 @@ class MainActivity : Activity(), Nav.Listener {
         findViewById<View>(R.id.btnHome).setOnClickListener { goHome() }
         findViewById<View>(R.id.btnHome).setOnLongClickListener { showHomeSettings(); true }
         findViewById<View>(R.id.btnRecents).setOnClickListener { showRecents() }
+        findViewById<View>(R.id.btnMute).setOnClickListener { showMuteMenu() }
+        updateMuteButton()
         findViewById<View>(R.id.btnStart).setOnClickListener { startNavigation() }
         findViewById<View>(R.id.btnCancel).setOnClickListener { clearRoute() }
         findViewById<View>(R.id.btnStop).setOnClickListener { stopNavigation() }
@@ -1446,18 +1449,60 @@ class MainActivity : Activity(), Nav.Listener {
         infoBox.addView(loading)
         placeActions(sheet, n)
         sheet.show()
+        // Google et OpenStreetMap interrogés en parallèle : on affiche dès qu'une réponse arrive.
         val googleKey = settings.googleKey
-        io.execute {
-            val osm = try { Nearby.osmDetails(n.name, n.lat, n.lon) } catch (e: Exception) { null }
-            val google = if (googleKey.isBlank()) null else try { Nearby.google(googleKey, n.name, n.lat, n.lon) } catch (e: Exception) { null }
-            main.post {
-                infoBox.removeAllViews()
-                fillPlaceInfo(sheet, infoBox, n, osm, google)
+        var osm: PlaceInfo? = null
+        var google: GoogleInfo? = null
+        var googleError: String? = null
+        var osmDone = false
+        var googleDone = googleKey.isBlank()
+        var timedOut = false
+        fun render() {
+            val final = (osmDone && googleDone) || timedOut
+            if (!final && osm == null && google == null) return
+            infoBox.removeAllViews()
+            fillPlaceInfo(sheet, infoBox, n, osm, google, final)
+            if (!final) infoBox.addView(TextView(this).apply {
+                text = "Recherche d'autres informations…"
+                setTextColor(Color.parseColor("#80868B"))
+                setPadding(0, dp(4), 0, dp(4))
+            })
+            googleError?.let { infoBox.addView(sheet.infoRow("⚠️", "Google : $it") { showKeySettings() }) }
+            if (googleKey.isBlank()) infoBox.addView(sheet.infoRow("🔑", "Ajoutez votre clé Google pour la note et les avis") { showKeySettings() })
+        }
+        if (googleKey.isNotBlank()) Thread {
+            var result: GoogleInfo? = null
+            var error: String? = null
+            try {
+                result = Nearby.google(googleKey, n.name, n.lat, n.lon)
+                if (result == null) error = "lieu introuvable"
+            } catch (e: Exception) {
+                error = googleErrorLabel(e)
             }
+            main.post { google = result; googleError = error; googleDone = true; render() }
+        }.start()
+        Thread {
+            val result = try { Nearby.osmDetails(n.name, n.lat, n.lon) } catch (e: Exception) { null }
+            main.post { osm = result; osmDone = true; render() }
+        }.start()
+        main.postDelayed({ if (!(osmDone && googleDone)) { timedOut = true; render() } }, 12_000)
+    }
+
+    /** Erreur Google Places traduite en conseil concret. */
+    private fun googleErrorLabel(e: Exception): String {
+        val m = e.message ?: return "erreur inconnue"
+        return when {
+            "API key not valid" in m || "API_KEY_INVALID" in m -> "clé refusée (vérifiez qu'elle est bien copiée)"
+            "BILLING" in m.uppercase() || "billing" in m -> "facturation non activée sur le projet Google Cloud (obligatoire, même pour l'offre gratuite)"
+            "has not been used" in m || "SERVICE_DISABLED" in m || "is disabled" in m -> "« Places API (New) » n'est pas activée pour ce projet Google Cloud"
+            "API_KEY_SERVICE_BLOCKED" in m || "are blocked" in m -> "la clé est limitée à d'autres API : autorisez « Places API (New) »"
+            "API_KEY_ANDROID_APP_BLOCKED" in m || "referer" in m.lowercase() -> "la clé est limitée à une autre appli ou un site : retirez cette restriction"
+            "HTTP 429" in m -> "quota dépassé"
+            else -> m.take(140)
         }
     }
 
-    private fun fillPlaceInfo(sheet: Sheet, box: LinearLayout, n: NearbyPlace, osm: PlaceInfo?, google: GoogleInfo?) {
+    private fun fillPlaceInfo(sheet: Sheet, box: LinearLayout, n: NearbyPlace, osm: PlaceInfo?, google: GoogleInfo?, final: Boolean = true) {
         // Note et avis
         if (google?.rating != null) {
             val stars = "★".repeat(Math.round(google.rating).toInt().coerceIn(0, 5)) + "☆".repeat(5 - Math.round(google.rating).toInt().coerceIn(0, 5))
@@ -1492,7 +1537,7 @@ class MainActivity : Activity(), Nav.Listener {
         osm?.cuisine?.let { box.addView(sheet.infoRow("🍴", "Cuisine : $it")) }
         val extras = listOfNotNull(if (osm?.takeaway == true) "à emporter" else null, if (osm?.delivery == true) "livraison" else null)
         if (extras.isNotEmpty()) box.addView(sheet.infoRow("🛍️", extras.joinToString(", ").replaceFirstChar { it.uppercase() }))
-        if (phone == null && website == null && hours == null && google?.rating == null) {
+        if (final && phone == null && website == null && hours == null && google?.rating == null) {
             box.addView(sheet.infoRow("ℹ️", "Pas d'informations détaillées pour ce lieu."))
         }
         // Note et avis complets sur Google Maps (gratuit, sans clé)
@@ -1643,6 +1688,7 @@ class MainActivity : Activity(), Nav.Listener {
             .item("🚦", "Trafic en temps réel", trafficState, "#E6F4EA") { toggleTraffic() }
             .item("🆕", "Nouveautés radars", lufopStore.lastImport?.let { "Base du $it" } ?: "Aucune base importée", "#F3E8FD") { showLufopNews() }
             .item("⚙️", "Réglages", null, "#F1F3F4") { showSettings() }
+            .item("❓", "Aide et nouveautés", "Version ${BuildConfig.VERSION_NAME}", "#E8F0FE") { showHelp() }
             .show()
     }
 
@@ -1718,6 +1764,177 @@ class MainActivity : Activity(), Nav.Listener {
     }
 
     /** Réglages : quelques rubriques, chacune ouvre son propre panneau. */
+    // ---------- Sourdine et voix ----------
+
+    private fun updateMuteButton() {
+        findViewById<TextView>(R.id.btnMute).text = when (settings.voiceMode) {
+            "mute" -> "🔇"
+            "alerts", "guidance" -> "🔉"
+            else -> "🔊"
+        }
+    }
+
+    private fun showMuteMenu() {
+        val sheet = Sheet(this).title("🔊  Annonces vocales", Voice.modes.first { it.first == settings.voiceMode }.second)
+        Voice.modes.forEach { (mode, label) ->
+            val icon = when (mode) { "all" -> "🔊"; "alerts" -> "📷"; "guidance" -> "🧭"; else -> "🔇" }
+            sheet.item(icon, label, if (mode == settings.voiceMode) "✓ Choix actuel" else null, if (mode == settings.voiceMode) "#D2E3FC" else "#F1F3F4") {
+                settings.voiceMode = mode
+                if (mode == "mute") Voice.stop()
+                updateMuteButton()
+                toast(label)
+            }
+        }
+        sheet.show()
+    }
+
+    private fun voiceSummary(): String {
+        val source = if (settings.voiceSource == "google" && settings.hasGoogle)
+            "Google · " + settings.googleVoice.removePrefix("fr-FR-") else "Voix du téléphone"
+        return "$source · " + (Voice.modes.firstOrNull { it.first == settings.voiceMode }?.second ?: "")
+    }
+
+    private fun showVoiceSettings() {
+        val sheet = Sheet(this).title("🗣️  Voix et annonces", voiceSummary())
+        sheet.item("🔊", "Annonces", Voice.modes.first { it.first == settings.voiceMode }.second, "#E8F0FE") { showMuteMenu() }
+        sheet.sectionTitle("Quelle voix ?")
+        val phone = settings.voiceSource != "google" || !settings.hasGoogle
+        sheet.item("📱", "Voix du téléphone", (if (phone) "✓ " else "") + "Gratuite, sans Internet · " + (settings.ttsVoice.ifBlank { "voix par défaut" }), if (phone) "#D2E3FC" else "#F1F3F4") {
+            settings.voiceSource = "device"
+            showDeviceVoices()
+        }
+        sheet.item("✨", "Voix naturelles Google", (if (!phone) "✓ " else "") + if (settings.hasGoogle) settings.googleVoice.removePrefix("fr-FR-") else "Clé Google nécessaire", if (!phone) "#D2E3FC" else "#F1F3F4") {
+            if (!settings.hasGoogle) showKeySettings() else showGoogleVoices()
+        }
+        Voice.lastCloudError?.let { sheet.text("Dernière erreur Google : ${googleErrorLabel(Exception(it))}", "#D93025", 13f) }
+        sheet.sectionTitle("Réglage")
+        val rates = listOf(0.85f to "Lente", 1f to "Normale", 1.15f to "Rapide", 1.3f to "Très rapide")
+        sheet.item("⏩", "Vitesse", rates.minByOrNull { Math.abs(it.first - settings.ttsRate) }?.second, "#F1F3F4") {
+            val s2 = Sheet(this).title("Vitesse de la voix")
+            rates.forEach { (r, label) -> s2.item("⏩", label, null, "#F1F3F4") { settings.ttsRate = r; Voice.applyDeviceVoice(); Voice.preview(); showVoiceSettings() } }
+            s2.show()
+        }
+        val pitches = listOf(0.8f to "Grave", 1f to "Normale", 1.2f to "Aiguë")
+        sheet.item("🎚️", "Hauteur", pitches.minByOrNull { Math.abs(it.first - settings.ttsPitch) }?.second, "#F1F3F4") {
+            val s2 = Sheet(this).title("Hauteur de la voix")
+            pitches.forEach { (r, label) -> s2.item("🎚️", label, null, "#F1F3F4") { settings.ttsPitch = r; Voice.applyDeviceVoice(); Voice.preview(); showVoiceSettings() } }
+            s2.show()
+        }
+        sheet.primary("▶  Écouter un essai") { Voice.preview(); showVoiceSettings() }
+        sheet.show()
+    }
+
+    private fun showDeviceVoices() {
+        val sheet = Sheet(this).title("📱  Voix du téléphone", "Toucher une voix pour l'écouter et la choisir")
+        val engines = Voice.engines()
+        if (engines.size > 1) {
+            sheet.sectionTitle("Moteur de voix")
+            val current = settings.ttsEngine.ifBlank { Voice.currentEngine() }
+            engines.forEach { e ->
+                sheet.item("⚙️", e.label, if (e.name == current) "✓ Utilisé" else null, if (e.name == current) "#D2E3FC" else "#F1F3F4") {
+                    settings.ttsEngine = e.name
+                    settings.ttsVoice = ""
+                    Voice.reloadEngine()
+                    toast("Moteur ${e.label} chargé")
+                    main.postDelayed({ showDeviceVoices() }, 1200)
+                }
+            }
+        }
+        val voices = Voice.deviceVoices()
+        sheet.sectionTitle("Voix françaises (${voices.size})")
+        if (voices.isEmpty()) sheet.text("Aucune voix française trouvée pour ce moteur.", "#5F6368")
+        sheet.item("🔁", "Voix par défaut", if (settings.ttsVoice.isBlank()) "✓ Choix actuel" else null, "#F1F3F4") {
+            settings.ttsVoice = ""
+            Voice.reloadEngine()
+            main.postDelayed({ Voice.preview() }, 800)
+        }
+        voices.forEach { v ->
+            val selected = v.name == settings.ttsVoice
+            val details = listOfNotNull(
+                if (selected) "✓ Choix actuel" else null,
+                if (v.isNetworkConnectionRequired) "en ligne" else "hors ligne",
+                if (v.quality >= android.speech.tts.Voice.QUALITY_HIGH) "haute qualité" else null,
+            ).joinToString(" · ")
+            sheet.item("🗣️", v.name.removePrefix("fr-fr-x-").removePrefix("fr-FR-"), details, if (selected) "#D2E3FC" else "#F1F3F4") {
+                settings.ttsVoice = v.name
+                settings.voiceSource = "device"
+                Voice.applyDeviceVoice()
+                Voice.preview()
+                showDeviceVoices()
+            }
+        }
+        sheet.secondary("Installer d'autres voix") {
+            try { startActivity(Intent("com.android.settings.TTS_SETTINGS")) } catch (e: Exception) {
+                try { startActivity(Intent(android.speech.tts.TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA)) } catch (e2: Exception) { toast("Réglage introuvable sur ce téléphone") }
+            }
+        }
+        sheet.show()
+    }
+
+    private fun showGoogleVoices() {
+        toast("Chargement des voix Google…")
+        val key = settings.googleKey
+        io.execute {
+            val result = try { Result.success(Voice.cloudVoices(key)) } catch (e: Exception) { Result.failure(e) }
+            main.post {
+                val voices = result.getOrNull()
+                if (voices == null) {
+                    val err = result.exceptionOrNull() as? Exception ?: Exception("erreur")
+                    val msg = googleErrorLabel(err).replace("Places API (New)", "Cloud Text-to-Speech API")
+                    Sheet(this).title("Voix Google indisponibles", msg)
+                        .text("Dans Google Cloud Console, activez « Cloud Text-to-Speech API » sur le même projet que votre clé. C'est gratuit jusqu'à 1 million de caractères par mois, et l'appli garde les annonces en cache.")
+                        .secondary("Fermer") {}
+                        .show()
+                    return@post
+                }
+                val sheet = Sheet(this).title("✨  Voix Google", "Toucher une voix pour l'écouter et la choisir")
+                voices.forEach { v ->
+                    val selected = settings.voiceSource == "google" && v.name == settings.googleVoice
+                    sheet.item(if (v.gender == "MALE") "👨" else "👩", v.label, if (selected) "✓ Choix actuel" else null, if (selected) "#D2E3FC" else "#F1F3F4") {
+                        settings.googleVoice = v.name
+                        settings.voiceSource = "google"
+                        Voice.preview()
+                        showGoogleVoices()
+                    }
+                }
+                sheet.show()
+            }
+        }
+    }
+
+    // ---------- Aide ----------
+
+    private fun showHelp() {
+        settings.seenVersion = BuildConfig.VERSION_CODE
+        Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
+            .sectionTitle("Nouveautés")
+            .text(
+                "🗣️ Choix de la voix : voix du téléphone ou voix naturelles Google (☰ › Réglages › Voix et annonces).\n" +
+                    "🔊 Bouton sourdine sur la carte : tout, alertes seulement, trajet seulement ou muet.\n" +
+                    "ℹ️ Fiches des lieux plus rapides, avec la raison exacte si Google ne répond pas.\n" +
+                    "🇫🇷 Radars France intégrés (20 592 points), en plus de l'Espagne.\n" +
+                    "🚗 Android Auto : carte, guidage, destinations, stations et signalements sur l'écran de la voiture.\n" +
+                    "🔒 Le guidage continue écran verrouillé, avec une notification."
+            )
+            .sectionTitle("Versions précédentes")
+            .text(
+                "v6 · Radars Espagne, pictogrammes de radars regroupés, maison plus discrète.\n" +
+                    "v5 · Boutons Maison et Récents, fiches restaurant, mise à jour Lufop par API.\n" +
+                    "v4 · Nouveaux menus, fiche station avec les prix, import de fichiers radars.\n" +
+                    "v1 à v3 · Guidage vocal, trafic, POIs, agenda, stations, McDo et Burger King.",
+                "#5F6368", 14f
+            )
+            .sectionTitle("Astuces")
+            .text(
+                "• Appui long sur la carte : y aller, ajouter un POI ou signaler.\n" +
+                    "• Appui long sur 🏠 : changer l'adresse de la maison.\n" +
+                    "• Pendant le guidage, une station ou un resto peut devenir une étape.\n" +
+                    "• Android Auto : ouvrez Android Auto › touchez 10 fois « Version » › ⋮ › Paramètres pour les développeurs › Sources inconnues."
+            )
+            .secondary("Fermer") {}
+            .show()
+    }
+
     private fun showSettings() {
         val iconLabels = mapOf(
             "fleche" to "Flèche bleue", "voiture_rouge" to "Voiture rouge", "voiture_noire" to "Voiture noire",
@@ -1730,6 +1947,7 @@ class MainActivity : Activity(), Nav.Listener {
             .item("🚗", "Mon véhicule", "${iconLabels[settings.positionIcon]} · $fuelLabel", "#E8F0FE") { showVehicleSettings() }
             .item("📷", "Radars et alertes", if (count > 0) "$count points Lufop · annonces ${if (settings.announceRadars) "activées" else "coupées"}" else "Lufop à configurer", "#F3E8FD") { showRadarSettings() }
             .item("🗺️", "Affichage de la carte", "Bornes, McDo / Burger King", "#E6F4EA") { showDisplaySettings() }
+            .item("🗣️", "Voix et annonces", voiceSummary(), "#FEF7E0") { showVoiceSettings() }
             .item("🔑", "Services connectés", listOfNotNull(
                 if (settings.hasTomTom) "Trafic TomTom ✓" else "Trafic TomTom ✗",
                 if (settings.hasGoogle) "Avis Google ✓" else "Avis Google ✗",
@@ -1867,6 +2085,7 @@ class MainActivity : Activity(), Nav.Listener {
         super.onResume()
         mapView.onResume()
         refreshAgenda()
+        updateMuteButton()
     }
     override fun onPause() { super.onPause(); mapView.onPause() }
     override fun onStop() { super.onStop(); mapView.onStop() }

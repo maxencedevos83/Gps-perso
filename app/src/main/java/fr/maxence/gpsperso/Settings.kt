@@ -62,6 +62,41 @@ class Settings(context: Context) {
         get() = prefs.getString("home_lon", "")?.toDoubleOrNull() ?: Double.NaN
         set(v) = prefs.edit().putString("home_lon", v.toString()).apply()
 
+    /** Sourdine : "all", "alerts" (radars et dangers), "guidance" (consignes de route), "mute". */
+    var voiceMode: String
+        get() = prefs.getString("voice_mode", "all") ?: "all"
+        set(v) = prefs.edit().putString("voice_mode", v).apply()
+
+    /** "device" : voix du téléphone ; "google" : voix Google Cloud (clé Google). */
+    var voiceSource: String
+        get() = prefs.getString("voice_source", "device") ?: "device"
+        set(v) = prefs.edit().putString("voice_source", v).apply()
+
+    var ttsEngine: String
+        get() = prefs.getString("tts_engine", "") ?: ""
+        set(v) = prefs.edit().putString("tts_engine", v).apply()
+
+    var ttsVoice: String
+        get() = prefs.getString("tts_voice", "") ?: ""
+        set(v) = prefs.edit().putString("tts_voice", v).apply()
+
+    var googleVoice: String
+        get() = prefs.getString("google_voice", "fr-FR-Neural2-A") ?: "fr-FR-Neural2-A"
+        set(v) = prefs.edit().putString("google_voice", v).apply()
+
+    var ttsRate: Float
+        get() = prefs.getFloat("tts_rate", 1f)
+        set(v) = prefs.edit().putFloat("tts_rate", v).apply()
+
+    var ttsPitch: Float
+        get() = prefs.getFloat("tts_pitch", 1f)
+        set(v) = prefs.edit().putFloat("tts_pitch", v).apply()
+
+    /** Dernière version dont on a montré les nouveautés. */
+    var seenVersion: Int
+        get() = prefs.getInt("seen_version", 0)
+        set(v) = prefs.edit().putInt("seen_version", v).apply()
+
     val hasHome: Boolean get() = !homeLat.isNaN() && !homeLon.isNaN()
     val hasLufop: Boolean get() = lufopKey.isNotBlank()
     val hasGoogle: Boolean get() = googleKey.isNotBlank()

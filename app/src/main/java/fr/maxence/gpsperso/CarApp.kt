@@ -205,6 +205,8 @@ class NavScreen(carContext: CarContext, private val carMap: CarMap) : Screen(car
         invalidate()
     }
 
+    private fun soundLabel() = if (Nav.settings.voiceMode == "mute") "🔇 Son" else "🔊 Son"
+
     override fun onGetTemplate(): Template {
         val b = NavigationTemplate.Builder()
         val strip = ActionStrip.Builder()
@@ -214,6 +216,7 @@ class NavScreen(carContext: CarContext, private val carMap: CarMap) : Screen(car
             strip.addAction(CarUi.action("Arrêter") { Nav.stopNavigation() })
             strip.addAction(CarUi.action("Signaler") { screenManager.push(ReportScreen(carContext)) })
             strip.addAction(CarUi.action("Étape") { screenManager.push(StationsScreen(carContext)) })
+            strip.addAction(CarUi.action(soundLabel()) { screenManager.push(SoundScreen(carContext)) })
             val p = Nav.lastProgress
             val man = p?.maneuver
             if (p == null || man == null) {
@@ -251,6 +254,7 @@ class NavScreen(carContext: CarContext, private val carMap: CarMap) : Screen(car
                 strip.addAction(CarUi.action("Signaler") { screenManager.push(ReportScreen(carContext)) })
             }
         }
+        if (!(Nav.navigating && route != null)) strip.addAction(CarUi.action(soundLabel()) { screenManager.push(SoundScreen(carContext)) })
         b.setActionStrip(strip.build())
         val mapStrip = ActionStrip.Builder()
             .addAction(Action.PAN)
@@ -450,5 +454,23 @@ class ReportScreen(carContext: CarContext) : Screen(carContext) {
         }
         @Suppress("DEPRECATION")
         return ListTemplate.Builder().setTitle("Signaler").setHeaderAction(Action.BACK).setSingleList(list.build()).build()
+    }
+}
+
+/** Sourdine depuis la voiture. */
+class SoundScreen(carContext: CarContext) : Screen(carContext) {
+    override fun onGetTemplate(): Template {
+        val list = ItemList.Builder()
+        Voice.modes.forEach { (mode, label) ->
+            val r = Row.Builder().setTitle(label).setOnClickListener {
+                Nav.settings.voiceMode = mode
+                if (mode == "mute") Voice.stop()
+                screenManager.pop()
+            }
+            if (mode == Nav.settings.voiceMode) r.addText("✓ Choix actuel")
+            list.addItem(r.build())
+        }
+        @Suppress("DEPRECATION")
+        return ListTemplate.Builder().setTitle("Annonces vocales").setHeaderAction(Action.BACK).setSingleList(list.build()).build()
     }
 }

@@ -214,6 +214,17 @@
                     android:textSize="22sp" />
 
                 <TextView
+                    android:id="@+id/btnMute"
+                    android:layout_width="52dp"
+                    android:layout_height="52dp"
+                    android:layout_marginTop="12dp"
+                    android:background="@drawable/bg_round"
+                    android:elevation="4dp"
+                    android:gravity="center"
+                    android:text="🔊"
+                    android:textSize="22sp" />
+
+                <TextView
                     android:id="@+id/btnRecenter"
                     android:layout_width="52dp"
                     android:layout_height="52dp"

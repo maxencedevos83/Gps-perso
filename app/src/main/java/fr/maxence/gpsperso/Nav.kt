@@ -8,14 +8,9 @@ import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
-import android.media.AudioManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 
@@ -24,7 +19,7 @@ import java.util.concurrent.Executors
  * consignes vocales, radars et trafic. Il vit tant que l'appli tourne, écran verrouillé compris
  * (un service de premier plan le maintient pendant le guidage).
  */
-object Nav : LocationListener, TextToSpeech.OnInitListener {
+object Nav : LocationListener {
 
     private const val OFF_ROUTE_METERS = 50.0
     private const val ALERT_AHEAD_METERS = 800.0
@@ -72,9 +67,6 @@ object Nav : LocationListener, TextToSpeech.OnInitListener {
     private val owners = HashSet<Any>()
     private var locating = false
 
-    private var tts: TextToSpeech? = null
-    private var ttsReady = false
-    private var focusRequest: AudioFocusRequest? = null
 
     var lastLocation: Location? = null; private set
     var destination: Place? = null; private set
@@ -124,7 +116,7 @@ object Nav : LocationListener, TextToSpeech.OnInitListener {
         lufopStore = LufopStore(app)
         recentStore = RecentStore(app)
         poiStore = PoiStore(app)
-        tts = TextToSpeech(app, this)
+        Voice.init(app, settings)
         main.postDelayed(ticker, 60_000)
     }
 
@@ -286,8 +278,7 @@ object Nav : LocationListener, TextToSpeech.OnInitListener {
         navigating = false
         currentAlert = null
         NavService.stop(app)
-        tts?.stop()
-        abandonFocus()
+        Voice.stop()
         emit { it.onAlert(null, null) }
         emit { it.onNavigationStopped() }
         if (owners.isEmpty()) stopLocation()
@@ -384,7 +375,7 @@ object Nav : LocationListener, TextToSpeech.OnInitListener {
             val limit = if (alert.detail != null && alert.type != AlertType.BOUCHON) ", limité à ${alert.detail}" else ""
             val length = if (alert.type == AlertType.BOUCHON && alert.detail != null) " sur ${alert.detail}" else ""
             val what = if (alert.description?.contains("zone de danger", ignoreCase = true) == true) "Zone de danger" else alert.type.spoken
-            say("$what$length dans ${Geo.spokenDistance(distance.coerceAtLeast(50.0))}$limit")
+            say("$what$length dans ${Geo.spokenDistance(distance.coerceAtLeast(50.0))}$limit", Voice.Kind.ALERT)
         }
     }
 
@@ -564,47 +555,7 @@ object Nav : LocationListener, TextToSpeech.OnInitListener {
 
     // ---------- Voix ----------
 
-    override fun onInit(status: Int) {
-        if (status != TextToSpeech.SUCCESS) return
-        val t = tts ?: return
-        t.language = java.util.Locale.FRANCE
-        // Voix de guidage : la musique (téléphone ou voiture) baisse le temps de l'annonce.
-        t.setAudioAttributes(guidanceAttributes)
-        t.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {}
-            override fun onDone(utteranceId: String?) { main.post { if (tts?.isSpeaking != true) abandonFocus() } }
-            @Deprecated("Requis par l'interface")
-            override fun onError(utteranceId: String?) { main.post { abandonFocus() } }
-        })
-        ttsReady = true
-    }
-
-    private val guidanceAttributes: AudioAttributes = AudioAttributes.Builder()
-        .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
-        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-        .build()
-
-    fun say(text: String) {
-        if (!ttsReady) return
-        requestFocus()
-        tts?.speak(text, TextToSpeech.QUEUE_ADD, null, text.hashCode().toString())
-    }
-
-    private fun requestFocus() {
-        if (focusRequest != null) return
-        val am = app.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-            .setAudioAttributes(guidanceAttributes)
-            .build()
-        am.requestAudioFocus(req)
-        focusRequest = req
-    }
-
-    private fun abandonFocus() {
-        val req = focusRequest ?: return
-        (app.getSystemService(Context.AUDIO_SERVICE) as AudioManager).abandonAudioFocusRequest(req)
-        focusRequest = null
-    }
+    fun say(text: String, kind: Voice.Kind = Voice.Kind.GUIDANCE) = Voice.say(text, kind)
 
     /** Ouvre l'appli sur le téléphone. */
     fun launchIntent(context: Context): Intent =
