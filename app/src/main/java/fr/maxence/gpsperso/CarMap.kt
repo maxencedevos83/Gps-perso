@@ -315,9 +315,8 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
         if (r == null || r.points.size < 2) routeSrc?.setGeoJson(empty)
         else routeSrc?.setGeoJson(Feature.fromGeometry(LineString.fromLngLats(r.points.map { Point.fromLngLat(it[1], it[0]) })))
         val d = Nav.destination
-        s.getSourceAs<GeoJsonSource>("dest-src")?.setGeoJson(
-            if (d == null) empty else Feature.fromGeometry(Point.fromLngLat(d.lon, d.lat))
-        )
+        val destSrc = s.getSourceAs<GeoJsonSource>("dest-src")
+        if (d == null) destSrc?.setGeoJson(empty) else destSrc?.setGeoJson(Feature.fromGeometry(Point.fromLngLat(d.lon, d.lat)))
     }
 
     private fun drawAlerts() {
