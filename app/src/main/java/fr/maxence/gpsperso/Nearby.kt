@@ -162,4 +162,116 @@ object Nearby {
     private fun capitalize(s: String) = s.lowercase(Locale.FRANCE).split(' ', '-').joinToString(" ") {
         it.replaceFirstChar { c -> c.titlecase(Locale.FRANCE) }
     }
+
+    /** Infos OpenStreetMap d'un lieu : téléphone, site, horaires, cuisine, adresse. */
+    fun osmDetails(name: String, lat: Double, lon: Double): PlaceInfo? {
+        val query = "[out:json][timeout:15];nwr(around:80,$lat,$lon)[\"name\"];out tags center 30;"
+        val candidates = overpass(query).mapNotNull { e ->
+            val tags = e.optJSONObject("tags") ?: return@mapNotNull null
+            val (la, lo) = coords(e) ?: return@mapNotNull null
+            Triple(tags, Geo.distance(lat, lon, la, lo), tags.optString("name"))
+        }
+        val best = candidates.filter { it.third.equals(name, ignoreCase = true) }.minByOrNull { it.second }
+            ?: candidates.filter { it.first.has("amenity") }.minByOrNull { it.second }
+            ?: return null
+        val t = best.first
+        fun tag(vararg keys: String) = keys.map { t.optString(it) }.firstOrNull { it.isNotBlank() }
+        val street = listOfNotNull(tag("addr:housenumber"), tag("addr:street")).joinToString(" ")
+        val address = listOf(street, listOfNotNull(tag("addr:postcode"), tag("addr:city")).joinToString(" "))
+            .filter { it.isNotBlank() }.joinToString(", ").ifBlank { null }
+        return PlaceInfo(
+            phone = tag("phone", "contact:phone"),
+            website = tag("website", "contact:website"),
+            hours = tag("opening_hours"),
+            cuisine = tag("cuisine")?.split(';')?.joinToString(", ") { cuisineLabel(it.trim()) },
+            address = address,
+            takeaway = tag("takeaway") == "yes",
+            delivery = tag("delivery") == "yes",
+        )
+    }
+
+    private fun cuisineLabel(c: String) = when (c) {
+        "burger" -> "burgers"
+        "pizza" -> "pizzas"
+        "french" -> "française"
+        "italian" -> "italienne"
+        "japanese" -> "japonaise"
+        "sushi" -> "sushis"
+        "chinese" -> "chinoise"
+        "asian" -> "asiatique"
+        "indian" -> "indienne"
+        "kebab" -> "kebab"
+        "chicken" -> "poulet"
+        "sandwich" -> "sandwichs"
+        "regional" -> "régionale"
+        "crepe" -> "crêpes"
+        "seafood" -> "fruits de mer"
+        "steak_house" -> "grill"
+        "coffee_shop" -> "café"
+        else -> c.replace('_', ' ')
+    }
+
+    /**
+     * Note, avis et coordonnées via Google Places (clé facultative ; la formule gratuite
+     * mensuelle de Google suffit pour un usage personnel).
+     */
+    fun google(key: String, name: String, lat: Double, lon: Double): GoogleInfo? {
+        val body = JSONObject()
+            .put("textQuery", name)
+            .put("languageCode", "fr")
+            .put("maxResultCount", 1)
+            .put("locationBias", JSONObject().put("circle", JSONObject()
+                .put("center", JSONObject().put("latitude", lat).put("longitude", lon))
+                .put("radius", 300.0)))
+        val fields = "places.displayName,places.rating,places.userRatingCount,places.nationalPhoneNumber," +
+            "places.websiteUri,places.currentOpeningHours,places.priceLevel,places.googleMapsUri,places.formattedAddress,places.location"
+        val json = JSONObject(Net.request(
+            "https://places.googleapis.com/v1/places:searchText", body.toString(),
+            headers = mapOf("X-Goog-Api-Key" to key, "X-Goog-FieldMask" to fields),
+        ))
+        val p = json.optJSONArray("places")?.optJSONObject(0) ?: return null
+        val loc = p.optJSONObject("location")
+        if (loc != null && Geo.distance(lat, lon, loc.optDouble("latitude"), loc.optDouble("longitude")) > 500) return null
+        val hours = p.optJSONObject("currentOpeningHours")
+        val days = hours?.optJSONArray("weekdayDescriptions")
+        return GoogleInfo(
+            rating = p.optDouble("rating").takeIf { !it.isNaN() },
+            ratingCount = p.optInt("userRatingCount", 0),
+            phone = p.optString("nationalPhoneNumber").ifBlank { null },
+            website = p.optString("websiteUri").ifBlank { null },
+            openNow = if (hours?.has("openNow") == true) hours.optBoolean("openNow") else null,
+            weekHours = (0 until (days?.length() ?: 0)).map { days!!.optString(it) },
+            priceLevel = when (p.optString("priceLevel")) {
+                "PRICE_LEVEL_INEXPENSIVE" -> "€"
+                "PRICE_LEVEL_MODERATE" -> "€€"
+                "PRICE_LEVEL_EXPENSIVE" -> "€€€"
+                "PRICE_LEVEL_VERY_EXPENSIVE" -> "€€€€"
+                else -> null
+            },
+            mapsUri = p.optString("googleMapsUri").ifBlank { null },
+            address = p.optString("formattedAddress").ifBlank { null },
+        )
+    }
 }
+
+class PlaceInfo(
+    val phone: String?,
+    val website: String?,
+    val hours: String?,
+    val cuisine: String?,
+    val address: String?,
+    val takeaway: Boolean,
+    val delivery: Boolean,
+)
+
+class GoogleInfo(
+    val rating: Double?,
+    val ratingCount: Int,
+    val phone: String?,
+    val website: String?,
+    val openNow: Boolean?,
+    val weekHours: List<String>,
+    val priceLevel: String?,
+    val mapsUri: String?,
+    val address: String?,
+)

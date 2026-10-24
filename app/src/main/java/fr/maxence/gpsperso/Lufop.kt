@@ -70,6 +70,16 @@ class LufopStore(context: Context) {
     }
 }
 
+/** Téléchargement direct de la base via l'API Lufop (clé personnelle, 200 requêtes par jour). */
+object LufopApi {
+    fun download(key: String): List<Alert> {
+        val raw = Net.request("https://api.lufop.net/api?key=${Net.enc(key)}&format=json&pays=fr&nbr=10000")
+        val items = RadarFile.parseJson("lufop-api", raw)
+        if (items.isEmpty()) throw IllegalStateException("Réponse Lufop non reconnue : ${raw.take(300)}")
+        return items
+    }
+}
+
 object RadarFile {
     /** Lit un fichier (ou une archive ZIP) et renvoie les points trouvés. */
     fun parse(fileName: String, bytes: ByteArray): List<Alert> {
@@ -85,6 +95,7 @@ object RadarFile {
             return all.distinctBy { it.id }
         }
         return when {
+            name.endsWith(".json") -> parseJson(fileName, decode(bytes))
             name.endsWith(".ov2") -> parseOv2(fileName, bytes)
             name.endsWith(".gpx") -> parseGpx(fileName, decode(bytes))
             name.endsWith(".kml") -> parseKml(fileName, decode(bytes))
@@ -92,12 +103,71 @@ object RadarFile {
             else -> {
                 val text = decode(bytes)
                 when {
+                    text.trimStart().startsWith("{") || text.trimStart().startsWith("[") -> parseJson(fileName, text)
                     "<gpx" in text -> parseGpx(fileName, text)
                     "<kml" in text -> parseKml(fileName, text)
                     else -> parseCsv(fileName, text)
                 }
             }
         }
+    }
+
+    /**
+     * JSON (API Lufop ou export) : on cherche le premier tableau d'objets avec des coordonnées,
+     * quel que soit le nom exact des champs.
+     */
+    fun parseJson(fileName: String, raw: String): List<Alert> {
+        val root: Any = try {
+            if (raw.trimStart().startsWith("[")) org.json.JSONArray(raw) else org.json.JSONObject(raw)
+        } catch (e: Exception) {
+            return emptyList()
+        }
+        val array = findArray(root) ?: return emptyList()
+        val out = ArrayList<Alert>()
+        for (i in 0 until array.length()) {
+            val o = array.optJSONObject(i) ?: continue
+            val lat = number(o, "lat", "latitude") ?: continue
+            val lon = number(o, "lng", "lon", "long", "longitude") ?: continue
+            val typeText = listOfNotNull(text(o, "type", "categorie", "category", "nom", "name"), text(o, "flash")).joinToString(" ")
+            val place = listOfNotNull(text(o, "voie", "street", "rue"), text(o, "commune", "city", "ville")).joinToString(", ")
+            val speed = text(o, "vitesse", "speed", "vit", "vma")?.filter { it.isDigit() }?.takeIf { it.isNotEmpty() }
+            make(fileName, lat, lon, listOf(typeText, place).filter { it.isNotBlank() }.joinToString(" · "), speed)?.let(out::add)
+        }
+        return out
+    }
+
+    private fun findArray(node: Any?, depth: Int = 0): org.json.JSONArray? {
+        if (depth > 4) return null
+        when (node) {
+            is org.json.JSONArray -> {
+                if (node.length() > 0 && node.optJSONObject(0)?.let { number(it, "lat", "latitude") != null } == true) return node
+                for (i in 0 until node.length()) findArray(node.opt(i), depth + 1)?.let { return it }
+            }
+            is org.json.JSONObject -> {
+                val keys = node.keys()
+                while (keys.hasNext()) findArray(node.opt(keys.next()), depth + 1)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    private fun findKey(o: org.json.JSONObject, names: Array<out String>): String? {
+        val keys = o.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            if (names.any { it.equals(k, ignoreCase = true) }) return k
+        }
+        return null
+    }
+
+    private fun number(o: org.json.JSONObject, vararg names: String): Double? {
+        val k = findKey(o, names) ?: return null
+        return o.opt(k)?.toString()?.replace(',', '.')?.toDoubleOrNull()
+    }
+
+    private fun text(o: org.json.JSONObject, vararg names: String): String? {
+        val k = findKey(o, names) ?: return null
+        return o.opt(k)?.toString()?.trim()?.takeIf { it.isNotEmpty() && it != "null" }
     }
 
     private fun decode(bytes: ByteArray): String {

@@ -19,7 +19,20 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
+      - name: Aperçu de la réponse de l'API Lufop
+        if: github.event_name != 'pull_request'
+        env:
+          LUFOP_KEY: ${{ secrets.LUFOP_KEY }}
+        run: |
+          if [ -n "$LUFOP_KEY" ]; then
+            curl -s -m 60 "https://api.lufop.net/api?key=$LUFOP_KEY&format=json&nbr=3" | head -c 2000 || true
+            echo
+          else
+            echo "Secret LUFOP_KEY absent"
+          fi
       - name: Compiler
+        env:
+          LUFOP_KEY: ${{ secrets.LUFOP_KEY }}
         run: ./gradlew assembleRelease --stacktrace
       - name: Renommer l'APK
         run: cp app/build/outputs/apk/release/app-release.apk gps-perso.apk

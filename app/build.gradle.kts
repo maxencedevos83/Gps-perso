@@ -15,6 +15,12 @@ android {
         targetSdk = 36
         versionCode = buildNumber
         versionName = "0.1.$buildNumber"
+        // Clé Lufop injectée depuis le secret GitHub LUFOP_KEY (jamais écrite dans le code)
+        buildConfigField("String", "LUFOP_KEY", "\"${System.getenv("LUFOP_KEY") ?: ""}\"")
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     // Clé de signature fixe : permet d'installer chaque nouvelle APK par-dessus l'ancienne.

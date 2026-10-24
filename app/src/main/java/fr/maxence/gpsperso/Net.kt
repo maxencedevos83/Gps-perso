@@ -27,13 +27,19 @@ object Net {
     )
     private val overpassLock = Any()
 
-    fun request(url: String, body: String? = null, contentType: String = "application/json"): String {
+    fun request(
+        url: String,
+        body: String? = null,
+        contentType: String = "application/json",
+        headers: Map<String, String> = emptyMap(),
+    ): String {
         val conn = URL(url).openConnection() as HttpURLConnection
         try {
             conn.connectTimeout = 15_000
             conn.readTimeout = 30_000
             conn.setRequestProperty("User-Agent", USER_AGENT)
             conn.setRequestProperty("Accept", "application/json")
+            headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
             if (body != null) {
                 conn.requestMethod = "POST"
                 conn.doOutput = true

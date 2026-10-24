@@ -93,7 +93,6 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     private lateinit var maneuverText: TextView
     private lateinit var alertBanner: TextView
     private lateinit var speedText: TextView
-    private lateinit var btnTraffic: TextView
     private lateinit var agendaChip: TextView
     private lateinit var routePanel: View
     private lateinit var routeTitle: TextView
@@ -108,6 +107,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     private lateinit var settings: Settings
     private lateinit var alertStore: AlertStore
     private lateinit var poiStore: PoiStore
+    private lateinit var recentStore: RecentStore
     private lateinit var lufopStore: LufopStore
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -165,6 +165,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         settings = Settings(this)
         alertStore = AlertStore(this)
         poiStore = PoiStore(this)
+        recentStore = RecentStore(this)
         lufopStore = LufopStore(this)
         bindViews()
         setupEdgeToEdge()
@@ -199,6 +200,8 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         tts = TextToSpeech(this, this)
         requestLocationPermission()
         io.execute { lufopStore.all() } // préchargement du cache
+        val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        if (settings.hasLufop && settings.lufopLastUpdate != today) updateFromLufopApi(manual = false)
         main.postDelayed(ticker, 60_000)
     }
 
@@ -215,7 +218,6 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         maneuverText = findViewById(R.id.maneuverText)
         alertBanner = findViewById(R.id.alertBanner)
         speedText = findViewById(R.id.speedText)
-        btnTraffic = findViewById(R.id.btnTraffic)
         agendaChip = findViewById(R.id.agendaChip)
         routePanel = findViewById(R.id.routePanel)
         routeTitle = findViewById(R.id.routeTitle)
@@ -242,9 +244,9 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         }
         findViewById<View>(R.id.btnRecenter).setOnClickListener { recenter() }
         findViewById<View>(R.id.btnReport).setOnClickListener { showReportDialog() }
-        btnTraffic.setOnClickListener { toggleTraffic() }
-        findViewById<View>(R.id.btnFood).setOnClickListener { showFoodMenu() }
-        findViewById<View>(R.id.btnFuel).setOnClickListener { showStations() }
+        findViewById<View>(R.id.btnHome).setOnClickListener { goHome() }
+        findViewById<View>(R.id.btnHome).setOnLongClickListener { showHomeSettings(); true }
+        findViewById<View>(R.id.btnRecents).setOnClickListener { showRecents() }
         findViewById<View>(R.id.btnStart).setOnClickListener { startNavigation() }
         findViewById<View>(R.id.btnCancel).setOnClickListener { clearRoute() }
         findViewById<View>(R.id.btnStop).setOnClickListener { stopNavigation() }
@@ -565,7 +567,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     // ---------- Trafic TomTom ----------
 
     private fun updateTrafficButton() {
-        btnTraffic.alpha = if (settings.trafficOn && settings.hasTomTom) 1f else 0.45f
+        // Le trafic se règle désormais depuis le menu ☰
     }
 
     private fun toggleTraffic() {
@@ -864,6 +866,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     private fun setDestination(place: Place) {
         val loc = lastLocation ?: run { toast("Position GPS pas encore disponible"); return }
         destination = place
+        if (place.name != "Point sur la carte") recentStore.add(place)
         stop = null
         agendaChip.visibility = View.GONE
         drawDestination(place)
@@ -1182,6 +1185,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     }
 
     /** Ouvre le sélecteur de fichiers pour importer une base Lufop (CSV, GPX, KML, OV2 ou ZIP). */
+    /** Ouvre le sélecteur de fichiers pour importer une base Lufop (CSV, GPX, KML, OV2, JSON ou ZIP). */
     private fun importRadarFile() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
@@ -1193,6 +1197,42 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         } catch (e: ActivityNotFoundException) {
             toast("Aucun gestionnaire de fichiers disponible")
         }
+    }
+
+    /** Télécharge la base complète via l'API Lufop puis montre les nouveautés. */
+    private fun updateFromLufopApi(manual: Boolean) {
+        val key = settings.lufopKey
+        if (key.isBlank()) return
+        if (manual) toast("Téléchargement de la base Lufop…")
+        io.execute {
+            try {
+                val items = LufopApi.download(key)
+                val result = lufopStore.import(items)
+                settings.lufopLastUpdate = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+                main.post {
+                    refreshAlertLayer()
+                    computeRouteAlerts()
+                    if (manual) showImportResult("API Lufop", items, result)
+                    else if (result.added.isNotEmpty()) toast("Lufop : ${result.added.size} nouveautés radar (menu ☰)")
+                }
+            } catch (e: Exception) {
+                main.post {
+                    if (manual) Sheet(this).title("Lufop indisponible").text(e.message ?: e.toString()).secondary("Fermer") {}.show()
+                }
+            }
+        }
+    }
+
+    private fun showImportResult(source: String, items: List<Alert>, result: ImportResult) {
+        val byType = items.groupingBy { it.type }.eachCount().entries
+            .joinToString("\n") { "${alertIcon(it.key)}  ${it.key.label} : ${it.value}" }
+        val sheet = Sheet(this).title("📥  Import réussi", source).text(byType)
+        if (!result.firstImport) sheet.text(
+            if (result.added.isEmpty()) "Aucune nouveauté par rapport au précédent import."
+            else "${result.added.size} nouveautés depuis le précédent import."
+        )
+        if (result.added.isNotEmpty()) sheet.primary("Voir les nouveautés") { showLufopNews() }
+        sheet.secondary("Fermer") {}.show()
     }
 
     @Deprecated("API Activity simple, suffisante ici")
@@ -1214,15 +1254,7 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
                 main.post {
                     refreshAlertLayer()
                     computeRouteAlerts()
-                    val byType = items.groupingBy { it.type }.eachCount().entries
-                        .joinToString("\n") { "${alertIcon(it.key)}  ${it.key.label} : ${it.value}" }
-                    val sheet = Sheet(this).title("📥  Import réussi", fileName).text(byType)
-                    if (!result.firstImport) sheet.text(
-                        if (result.added.isEmpty()) "Aucune nouveauté par rapport au précédent import."
-                        else "${result.added.size} nouveautés depuis le précédent import."
-                    )
-                    if (result.added.isNotEmpty()) sheet.primary("Voir les nouveautés") { showLufopNews() }
-                    sheet.secondary("Fermer") {}.show()
+                    showImportResult(fileName, items, result)
                 }
             } catch (e: Exception) {
                 main.post {
@@ -1574,15 +1606,85 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
     }
 
     /** Fiche d'un lieu : nom, infos, distance et gros bouton pour s'y rendre. */
+    /** Fiche d'un lieu : nom, infos détaillées (téléphone, horaires, note), gros bouton pour s'y rendre. */
     private fun showPlaceCard(n: NearbyPlace) {
         if (n.kind == NearbyKind.STATION) { showStationCard(n); return }
         val icon = when (n.brand) { "mcdo" -> "🍟"; "bk" -> "👑"; else -> "🍽️" }
         val sheet = Sheet(this).title("$icon  ${n.name}", listOfNotNull(n.detail, distanceLabel(n.lat, n.lon)).joinToString(" · "))
+        val infoBox = sheet.slot()
+        val loading = TextView(this).apply {
+            text = "Chargement des informations…"
+            setTextColor(Color.parseColor("#80868B"))
+            setPadding(0, dp(4), 0, dp(8))
+        }
+        infoBox.addView(loading)
         placeActions(sheet, n)
         sheet.show()
+        val googleKey = settings.googleKey
+        io.execute {
+            val osm = try { Nearby.osmDetails(n.name, n.lat, n.lon) } catch (e: Exception) { null }
+            val google = if (googleKey.isBlank()) null else try { Nearby.google(googleKey, n.name, n.lat, n.lon) } catch (e: Exception) { null }
+            main.post {
+                infoBox.removeAllViews()
+                fillPlaceInfo(sheet, infoBox, n, osm, google)
+            }
+        }
     }
 
-    /** Fiche station : prix lisibles en grand, carburant préféré mis en avant. */
+    private fun fillPlaceInfo(sheet: Sheet, box: LinearLayout, n: NearbyPlace, osm: PlaceInfo?, google: GoogleInfo?) {
+        // Note et avis
+        if (google?.rating != null) {
+            val stars = "★".repeat(Math.round(google.rating).toInt().coerceIn(0, 5)) + "☆".repeat(5 - Math.round(google.rating).toInt().coerceIn(0, 5))
+            box.addView(TextView(this).apply {
+                text = String.format(Locale.FRANCE, "%.1f  %s", google.rating, stars) +
+                    "  (${google.ratingCount} avis)" + (google.priceLevel?.let { " · $it" } ?: "")
+                textSize = 18f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setTextColor(Color.parseColor("#E37400"))
+                setPadding(0, dp(2), 0, dp(6))
+            })
+        }
+        google?.openNow?.let { open ->
+            box.addView(sheet.infoRow(if (open) "🟢" else "🔴", if (open) "Ouvert actuellement" else "Fermé actuellement"))
+        }
+        val address = google?.address ?: osm?.address
+        address?.let { box.addView(sheet.infoRow("📍", it)) }
+        val phone = google?.phone ?: osm?.phone
+        phone?.let { tel ->
+            box.addView(sheet.infoRow("📞", tel) {
+                startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + tel.filter { it.isDigit() || it == '+' })))
+            })
+        }
+        val website = google?.website ?: osm?.website
+        website?.let { url ->
+            box.addView(sheet.infoRow("🌐", url.removePrefix("https://").removePrefix("http://").removeSuffix("/")) {
+                try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(if (url.startsWith("http")) url else "https://$url"))) } catch (e: Exception) { }
+            })
+        }
+        val hours = google?.weekHours?.takeIf { it.isNotEmpty() }?.joinToString("\n") ?: osm?.hours?.let { formatOsmHours(it) }
+        hours?.let { box.addView(sheet.infoRow("🕘", it)) }
+        osm?.cuisine?.let { box.addView(sheet.infoRow("🍴", "Cuisine : $it")) }
+        val extras = listOfNotNull(if (osm?.takeaway == true) "à emporter" else null, if (osm?.delivery == true) "livraison" else null)
+        if (extras.isNotEmpty()) box.addView(sheet.infoRow("🛍️", extras.joinToString(", ").replaceFirstChar { it.uppercase() }))
+        if (phone == null && website == null && hours == null && google?.rating == null) {
+            box.addView(sheet.infoRow("ℹ️", "Pas d'informations détaillées pour ce lieu."))
+        }
+        // Note et avis complets sur Google Maps (gratuit, sans clé)
+        box.addView(sheet.infoRow("⭐", if (google?.rating != null) "Lire les avis sur Google Maps" else "Voir la note et les avis sur Google Maps") {
+            val uri = google?.mapsUri?.let { Uri.parse(it) } ?: Uri.parse("geo:${n.lat},${n.lon}?q=" + Uri.encode(n.name))
+            try { startActivity(Intent(Intent.ACTION_VIEW, uri)) } catch (e: Exception) { toast("Google Maps n'est pas installé") }
+        })
+    }
+
+    /** Horaires OSM rendus un peu plus lisibles (Mo-Fr 09:00-18:00 → lun-ven 09h00-18h00). */
+    private fun formatOsmHours(h: String): String {
+        if (h == "24/7") return "Ouvert 24h/24, 7j/7"
+        val days = mapOf("Mo" to "lun", "Tu" to "mar", "We" to "mer", "Th" to "jeu", "Fr" to "ven", "Sa" to "sam", "Su" to "dim", "PH" to "fériés", "off" to "fermé")
+        var out = h
+        days.forEach { (k, v) -> out = out.replace(Regex("\\b$k\\b"), v) }
+        return out.replace(Regex("(\\d{2}):(\\d{2})"), "$1h$2").split(";").joinToString("\n") { it.trim() }
+    }
+
     private fun showStationCard(n: NearbyPlace) {
         if (n.prices.isEmpty() && n.id.startsWith("base-")) {
             // Station touchée sur le fond de carte : on cherche ses prix officiels
@@ -1702,21 +1804,82 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
 
     private fun showMainMenu() {
         val next = agendaEvents.firstOrNull()
-        val lufopCount = lufopStore.all().size
+        val trafficState = when {
+            !settings.hasTomTom -> "Clé TomTom à ajouter"
+            settings.trafficOn -> "Affiché · toucher pour masquer"
+            else -> "Masqué · toucher pour afficher"
+        }
         Sheet(this)
             .title("GPS Perso")
+            .sectionTitle("Aller quelque part")
             .item("📅", "Mon agenda", next?.let { "${it.whenLabel()} · ${it.title}" } ?: "Rendez-vous avec une adresse", "#E8F0FE") { showAgenda() }
+            .item("🕘", "Adresses récentes", null, "#E8F0FE") { showRecents() }
             .item("⭐", "Mes POIs", "${poiStore.all().size} lieux enregistrés", "#FEF7E0") { showPoiList() }
-            .item("📍", "Ajouter ma position en POI", null, "#E6F4EA") {
-                lastLocation?.let { showAddPoiDialog(it.latitude, it.longitude) } ?: toast("Position GPS pas encore disponible")
-            }
+            .sectionTitle("Autour de moi / sur le trajet")
             .item("⛽", "Stations-service", "Prix du carburant", "#FCE8E6") { showStations() }
-            .item("🍽️", "Restaurants", null, "#FDE7DD") { showRestaurants() }
             .item("🍟", "McDonald's et Burger King", null, "#FFF3C4") { showBrands() }
-            .item("📥", "Importer un fichier Lufop", if (lufopCount > 0) "$lufopCount points importés le ${lufopStore.lastImport}" else "Radars, bornes… (CSV, GPX, KML, OV2, ZIP)", "#F3E8FD") { importRadarFile() }
-            .item("🆕", "Nouveautés radars", "Depuis le dernier import", "#F3E8FD") { showLufopNews() }
+            .item("🍽️", "Restaurants", null, "#FDE7DD") { showRestaurants() }
+            .sectionTitle("Carte")
+            .item("🚦", "Trafic en temps réel", trafficState, "#E6F4EA") { toggleTraffic() }
+            .item("🆕", "Nouveautés radars", lufopStore.lastImport?.let { "Base du $it" } ?: "Aucune base importée", "#F3E8FD") { showLufopNews() }
             .item("⚙️", "Réglages", null, "#F1F3F4") { showSettings() }
             .show()
+    }
+
+    // ---------- Maison et adresses récentes ----------
+
+    private fun goHome() {
+        if (!settings.hasHome) {
+            showHomeSettings()
+            return
+        }
+        if (navigating) stopNavigation()
+        setDestination(Place("Maison", settings.homeName, settings.homeLat, settings.homeLon))
+    }
+
+    private fun showHomeSettings() {
+        val sheet = Sheet(this).title("🏠  Ma maison", if (settings.hasHome) settings.homeName else "Pas encore définie")
+        val address = sheet.input("Adresse de la maison", "")
+        sheet.primary("Enregistrer cette adresse") {
+            val q = address.text.toString().trim()
+            if (q.length < 3) return@primary
+            val loc = lastLocation
+            io.execute {
+                val place = try { Net.search(q, loc?.latitude, loc?.longitude).firstOrNull() } catch (e: Exception) { null }
+                main.post {
+                    if (place == null) toast("Adresse introuvable") else saveHome(listOf(place.name, place.address).filter { it.isNotBlank() }.joinToString(", "), place.lat, place.lon)
+                }
+            }
+        }
+        sheet.secondary("📍  Utiliser ma position actuelle") {
+            val loc = lastLocation ?: run { toast("Position GPS pas encore disponible"); return@secondary }
+            io.execute {
+                val name = try { Net.reverse(loc.latitude, loc.longitude) } catch (e: Exception) { null } ?: "Ma position"
+                main.post { saveHome(name, loc.latitude, loc.longitude) }
+            }
+        }
+        sheet.show()
+    }
+
+    private fun saveHome(name: String, lat: Double, lon: Double) {
+        settings.homeName = name
+        settings.homeLat = lat
+        settings.homeLon = lon
+        toast("Maison enregistrée : $name")
+    }
+
+    private fun showRecents() {
+        val recents = recentStore.all()
+        val sheet = Sheet(this).title("🕘  Adresses récentes")
+        if (recents.isEmpty()) sheet.text("Les adresses que vous recherchez apparaîtront ici.")
+        recents.forEach { p ->
+            sheet.item(if (p.name == "Maison") "🏠" else "🕘", p.name, listOfNotNull(p.address.ifBlank { null }, distanceLabel(p.lat, p.lon)).joinToString(" · "), "#F1F3F4") {
+                if (navigating) stopNavigation()
+                setDestination(p)
+            }
+        }
+        if (recents.isNotEmpty()) sheet.secondary("Effacer l'historique") { recentStore.clear() }
+        sheet.show()
     }
 
     private fun showLufopNews() {
@@ -1734,23 +1897,96 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
         sheet.show()
     }
 
+    /** Réglages : quelques rubriques, chacune ouvre son propre panneau. */
     private fun showSettings() {
-        val sheet = Sheet(this).title("⚙️  Réglages")
-        sheet.sectionTitle("Trafic en temps réel (TomTom)")
-        val tomtom = sheet.input("Clé API TomTom (developer.tomtom.com)", settings.tomtomKey)
-        sheet.sectionTitle("Affichage")
-        val chargers = switchRow("Bornes de recharge sur la carte", settings.showChargers)
-        val brands = switchRow("McDonald's et Burger King en évidence", settings.showBrands)
-        val radars = switchRow("Annonces vocales des radars", settings.announceRadars)
-        sheet.view(chargers).view(brands).view(radars)
+        val iconLabels = mapOf(
+            "fleche" to "Flèche bleue", "voiture_rouge" to "Voiture rouge", "voiture_noire" to "Voiture noire",
+            "voiture_bleue" to "Voiture bleue", "moto" to "Moto", "camion" to "Camion",
+        )
+        val fuelLabel = Nearby.fuels.firstOrNull { it.first == settings.fuel }?.second ?: settings.fuel
+        val count = lufopStore.all().size
+        Sheet(this).title("⚙️  Réglages")
+            .item("🏠", "Ma maison", if (settings.hasHome) settings.homeName else "Non définie", "#E8F0FE") { showHomeSettings() }
+            .item("🚗", "Mon véhicule", "${iconLabels[settings.positionIcon]} · $fuelLabel", "#E8F0FE") { showVehicleSettings() }
+            .item("📷", "Radars et alertes", if (count > 0) "$count points Lufop · annonces ${if (settings.announceRadars) "activées" else "coupées"}" else "Lufop à configurer", "#F3E8FD") { showRadarSettings() }
+            .item("🗺️", "Affichage de la carte", "Bornes, McDo / Burger King", "#E6F4EA") { showDisplaySettings() }
+            .item("🔑", "Services connectés", listOfNotNull(
+                if (settings.hasTomTom) "Trafic TomTom ✓" else "Trafic TomTom ✗",
+                if (settings.hasGoogle) "Avis Google ✓" else "Avis Google ✗",
+            ).joinToString(" · "), "#F1F3F4") { showKeySettings() }
+            .show()
+    }
 
+    private fun showVehicleSettings() {
+        val iconLabels = listOf(
+            "fleche" to "Flèche bleue", "voiture_rouge" to "Voiture rouge", "voiture_noire" to "Voiture noire",
+            "voiture_bleue" to "Voiture bleue", "moto" to "Moto", "camion" to "Camion",
+        )
+        val sheet = Sheet(this).title("🚗  Mon véhicule").sectionTitle("Icône de ma position")
+        iconLabels.forEach { (key, label) ->
+            sheet.item(if (key == settings.positionIcon) "✓" else "", label, null, "#E8F0FE") {
+                settings.positionIcon = key
+                applyPositionIcon()
+                showVehicleSettings()
+            }
+        }
+        sheet.sectionTitle("Mon carburant (prix des stations)")
+        Nearby.fuels.forEach { (key, label) ->
+            sheet.item(if (key == settings.fuel) "✓" else "", label, null, "#FCE8E6") {
+                settings.fuel = key
+                showVehicleSettings()
+            }
+        }
+        sheet.show()
+    }
+
+    private fun showRadarSettings() {
+        val count = lufopStore.all().size
+        val sheet = Sheet(this).title("📷  Radars et alertes", if (count > 0) "$count points Lufop, mis à jour le ${lufopStore.lastImport}" else "Aucune base Lufop pour l'instant")
+        val announce = switchRow("Annonces vocales des radars", settings.announceRadars)
+        sheet.view(announce)
+        sheet.sectionTitle("Clé API Lufop")
+        val key = sheet.input("Clé API Lufop", settings.lufopKey)
         fun save() {
-            settings.tomtomKey = tomtom.text.toString()
+            settings.announceRadars = announce.isChecked
+            settings.lufopKey = key.text.toString()
+            computeRouteAlerts()
+        }
+        sheet.primary("⬇️  Mettre à jour depuis Lufop") {
+            save()
+            if (settings.hasLufop) updateFromLufopApi(manual = true) else toast("Saisissez d'abord votre clé Lufop")
+        }
+        sheet.secondary("📥  Importer un fichier") {
+            save()
+            importRadarFile()
+        }
+        if (count > 0) sheet.secondary("Effacer la base importée") {
+            save()
+            lufopStore.clear()
+            refreshAlertLayer()
+            computeRouteAlerts()
+            toast("Base Lufop effacée")
+        }
+        sheet.onDismiss { save() }
+        sheet.show()
+    }
+
+    private fun showDisplaySettings() {
+        val sheet = Sheet(this).title("🗺️  Affichage de la carte")
+        val chargers = switchRow("Bornes de recharge", settings.showChargers)
+        val brands = switchRow("McDonald's et Burger King en évidence", settings.showBrands)
+        val traffic = switchRow("Trafic en temps réel", settings.trafficOn)
+        sheet.view(traffic).view(chargers).view(brands)
+        sheet.onDismiss {
             settings.showChargers = chargers.isChecked
             settings.showBrands = brands.isChecked
-            settings.announceRadars = radars.isChecked
-            updateTrafficButton()
-            updateTrafficLayer()
+            if (traffic.isChecked != settings.trafficOn) {
+                settings.trafficOn = traffic.isChecked
+                updateTrafficLayer()
+                if (!traffic.isChecked) incidents = emptyMap()
+                lastIncidentsAt = 0
+                periodicRefresh()
+            }
             refreshBrandLayer()
             osmCenter = null
             brandsCenter = null
@@ -1758,55 +1994,28 @@ class MainActivity : Activity(), LocationListener, TextToSpeech.OnInitListener {
                 maybeLoadOsmAround(it)
                 maybeLoadBrandsAround(it)
             }
+            refreshAlertLayer()
+            computeRouteAlerts()
+        }
+        sheet.primary("Terminé") {}
+        sheet.show()
+    }
+
+    private fun showKeySettings() {
+        val sheet = Sheet(this).title("🔑  Services connectés", "Clés gratuites, gardées sur ce téléphone")
+        sheet.sectionTitle("Trafic TomTom (developer.tomtom.com)")
+        val tomtom = sheet.input("Clé API TomTom", settings.tomtomKey)
+        sheet.sectionTitle("Notes et avis Google (facultatif)")
+        sheet.text("Sans clé, le bouton « Voir les avis sur Google Maps » reste disponible sur chaque restaurant.", "#5F6368", 13f)
+        val google = sheet.input("Clé API Google Places", settings.googleKey)
+        sheet.primary("Enregistrer") {
+            settings.tomtomKey = tomtom.text.toString()
+            settings.googleKey = google.text.toString()
+            updateTrafficLayer()
             lastIncidentsAt = 0
             periodicRefresh()
-            refreshAlertLayer()
-            computeRouteAlerts()
+            toast("Clés enregistrées")
         }
-
-        val iconLabels = mapOf(
-            "fleche" to "Flèche bleue", "voiture_rouge" to "Voiture rouge", "voiture_noire" to "Voiture noire",
-            "voiture_bleue" to "Voiture bleue", "moto" to "Moto", "camion" to "Camion",
-        )
-        val fuelLabel = Nearby.fuels.firstOrNull { it.first == settings.fuel }?.second ?: settings.fuel
-        sheet.sectionTitle("Mon véhicule")
-        sheet.item("🚗", "Icône de ma position", iconLabels[settings.positionIcon], "#E8F0FE") {
-            save()
-            val choice = Sheet(this).title("Icône de ma position")
-            iconLabels.forEach { (key, label) ->
-                choice.item(if (key == settings.positionIcon) "✓" else "", label, null, "#E8F0FE") {
-                    settings.positionIcon = key
-                    applyPositionIcon()
-                    showSettings()
-                }
-            }
-            choice.show()
-        }
-        sheet.item("⛽", "Mon carburant", fuelLabel, "#FCE8E6") {
-            save()
-            val choice = Sheet(this).title("Mon carburant")
-            Nearby.fuels.forEach { (key, label) ->
-                choice.item(if (key == settings.fuel) "✓" else "", label, null, "#FCE8E6") {
-                    settings.fuel = key
-                    showSettings()
-                }
-            }
-            choice.show()
-        }
-        sheet.sectionTitle("Radars Lufop")
-        val count = lufopStore.all().size
-        sheet.item("📥", "Importer un fichier", if (count > 0) "$count points, importés le ${lufopStore.lastImport}" else "Téléchargez la base sur lufop.net puis importez-la", "#F3E8FD") {
-            save()
-            importRadarFile()
-        }
-        if (count > 0) sheet.item("🗑️", "Effacer la base importée", null, "#F1F3F4") {
-            save()
-            lufopStore.clear()
-            refreshAlertLayer()
-            computeRouteAlerts()
-            toast("Base Lufop effacée")
-        }
-        sheet.primary("Enregistrer") { save() }
         sheet.show()
     }
 

@@ -156,6 +156,39 @@ class Sheet(private val activity: Activity) {
         return this
     }
 
+    /** Zone vide à remplir plus tard (infos chargées en arrière-plan). */
+    fun slot(): LinearLayout {
+        val box = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+        content.addView(box)
+        return box
+    }
+
+    /** Ligne d'information : icône, texte, action facultative au toucher. */
+    fun infoRow(icon: String, text: String, onClick: (() -> Unit)? = null): View {
+        val row = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(8), 0, dp(8))
+            if (onClick != null) {
+                isClickable = true
+                background = activity.getDrawable(android.R.drawable.list_selector_background)
+                setOnClickListener { onClick() }
+            }
+        }
+        row.addView(TextView(activity).apply {
+            this.text = icon
+            textSize = 18f
+            gravity = Gravity.CENTER
+        }, LinearLayout.LayoutParams(dp(36), ViewGroup.LayoutParams.WRAP_CONTENT))
+        row.addView(TextView(activity).apply {
+            this.text = text
+            textSize = 15.5f
+            setLineSpacing(0f, 1.15f)
+            setTextColor(Color.parseColor(if (onClick != null) "#1A73E8" else "#3C4043"))
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        return row
+    }
+
     fun view(v: View): Sheet {
         content.addView(v)
         return this

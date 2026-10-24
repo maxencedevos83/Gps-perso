@@ -23,6 +23,8 @@ L'APK est compilée automatiquement par GitHub Actions à chaque modification de
 - POIs perso : appui long sur la carte ou menu ☰ › Ajouter ma position, avec catégorie.
 - Bouton ⚠ pour signaler police, radar mobile, accident, danger, travaux, bouchon.
 - Bouton « Waze » pour ouvrir la même destination dans Waze.
+- Bouton 🏠 Maison (appui long pour changer l'adresse) et bouton 🕘 des adresses récentes.
+- Fiche restaurant : téléphone, site, horaires, cuisine (OpenStreetMap), note et avis Google (clé facultative) ou lien vers les avis Google Maps.
 - Agenda du téléphone (Google Agenda, etc.) : rendez-vous avec un lieu, raccourci « Y aller » pour le prochain.
 - Icône de position au choix : flèche, voitures, moto, camion (☰ › Réglages).
 - Stations-service (bouton ⛽) avec prix officiels du carburant choisi (data.economie.gouv.fr), tri par prix.
@@ -32,6 +34,10 @@ L'APK est compilée automatiquement par GitHub Actions à chaque modification de
 ## Clés gratuites (menu ☰ › Réglages)
 
 - **TomTom** (trafic) : compte sur https://developer.tomtom.com, puis copier la clé API.
+
+## Clé Lufop
+
+Dans Réglages › Radars et alertes, ou en secret GitHub `LUFOP_KEY` (Settings › Secrets and variables › Actions) : elle est alors intégrée à l'APK à la compilation, sans être écrite dans le code. La base est retéléchargée une fois par jour et les nouveautés sont signalées.
 
 ## Limites connues
 
