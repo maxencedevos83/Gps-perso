@@ -4,21 +4,22 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Bison Futé DATEX II détails
+      - name: Overpass limitations de vitesse
         run: |
-          curl -s -m 60 https://tipi.bison-fute.gouv.fr/bison-fute-ouvert/publicationsDIR/Evenementiel-DIR/grt/RRN/content.xml -o /tmp/bf.xml
           python3 - <<'PY'
-          import re
-          s=open('/tmp/bf.xml',encoding='utf-8').read()
-          print('types', sorted(set(re.findall(r'situationRecord xsi:type="ns2:(\w+)"',s))))
-          from collections import Counter
-          print(Counter(re.findall(r'situationRecord xsi:type="ns2:(\w+)"',s)))
-          sits=re.findall(r'<ns2:situation .*?</ns2:situation>',s,re.S)
-          print('situations',len(sits))
-          tags=Counter(re.findall(r'<ns2:(\w+)',s))
-          print([t for t in tags if 'oord' in t or 'atitude' in t or 'ocation' in t or 'oint' in t or 'linear' in t.lower()])
-          for x in sits[:1]+[y for y in sits if 'Accident' in y][:1]+[y for y in sits if 'MaintenanceWorks' in y][:1]:
-            print('-----'); print(re.sub(r'\s+',' ',x)[:6000])
-          print('cause types', Counter(re.findall(r'<ns2:(accidentType|roadMaintenanceType|obstructionType|abnormalTrafficType|roadOrCarriagewayOrLaneManagementType|environmentalObstructionType|poorEnvironmentType|vehicleObstructionType|generalObstructionType|equipmentOrSystemFaultType|disturbanceActivityType|nonWeatherRelatedRoadConditionType|weatherRelatedRoadConditionType)>(\w+)<',s)).most_common(40))
+          import urllib.request, urllib.parse, time, json
+          servers=["https://overpass-api.de/api/interpreter","https://overpass.kumi.systems/api/interpreter","https://overpass.private.coffee/api/interpreter","https://maps.mail.ru/osm/tools/overpass/api/interpreter"]
+          pts=[(43.135,5.93),(43.25,6.07),(48.85,2.35)]
+          old='[out:json][timeout:10];way(around:1000,{lat},{lon})[highway~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|road)(_link)?$"];out tags geom;'
+          new='[out:json][timeout:15];way(around:1500,{lat},{lon})[highway~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|road)(_link)?$"][~"^(maxspeed|maxspeed:forward|maxspeed:backward|zone:maxspeed)$"~"."];out tags geom qt;'
+          for s in servers:
+            for name,q in (('old',old),('new',new)):
+              for lat,lon in pts[:2]:
+                t=time.time()
+                try:
+                  req=urllib.request.Request(s,data=('data='+urllib.parse.quote(q.format(lat=lat,lon=lon))).encode(),headers={'User-Agent':'GPSPerso/0.1 probe'})
+                  b=urllib.request.urlopen(req,timeout=30).read()
+                  j=json.loads(b); print(s.split('/')[2],name,lat,'OK',round(time.time()-t,1),'s',len(b)//1024,'KB',len(j['elements']),'ways', sum(1 for e in j['elements'] if 'maxspeed' in e.get('tags',{})))
+                except Exception as e:
+                  print(s.split('/')[2],name,lat,'ERR',round(time.time()-t,1),'s',str(e)[:80])
           PY
-          curl -s -m 30 https://tipi.bison-fute.gouv.fr/bison-fute-ouvert/publicationsDIR/Evenementiel-DIR/cnir/ | grep -o 'href="[^"]*"' | head
