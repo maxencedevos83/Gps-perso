@@ -383,7 +383,8 @@ object Nav : LocationListener, TextToSpeech.OnInitListener {
         if (spoken.add("a-${alert.id}")) {
             val limit = if (alert.detail != null && alert.type != AlertType.BOUCHON) ", limité à ${alert.detail}" else ""
             val length = if (alert.type == AlertType.BOUCHON && alert.detail != null) " sur ${alert.detail}" else ""
-            say("${alert.type.spoken}$length dans ${Geo.spokenDistance(distance.coerceAtLeast(50.0))}$limit")
+            val what = if (alert.description?.contains("zone de danger", ignoreCase = true) == true) "Zone de danger" else alert.type.spoken
+            say("$what$length dans ${Geo.spokenDistance(distance.coerceAtLeast(50.0))}$limit")
         }
     }
 

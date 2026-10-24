@@ -1786,6 +1786,7 @@ class MainActivity : Activity(), Nav.Listener {
             val label = when (name) {
                 "api-lufop" -> "Lufop (API)"
                 "ESRADARES" -> "Radars Espagne"
+                "FRradarFR" -> "Radars France"
                 else -> name
             }
             sheet.item("🗂️", label, "$size points", "#F3E8FD") {
