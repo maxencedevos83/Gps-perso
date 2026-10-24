@@ -391,7 +391,7 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
         if (!Nav.hasLocationPermission()) return
         val ctx = presentation?.context ?: return
         val icon = positionIconRes()
-        val opts = if (icon == null) LocationComponentOptions.builder(ctx).build() else LocationComponentOptions.builder(ctx)
+        val opts = if (icon == null) LocationComponentOptions.builder(ctx).minZoomIconScale(1.0f).maxZoomIconScale(1.5f).build() else LocationComponentOptions.builder(ctx)
             .gpsDrawable(icon)
             .foregroundDrawable(icon)
             .foregroundDrawableStale(icon)
@@ -399,6 +399,8 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
             .backgroundDrawableStale(R.drawable.pos_none)
             .bearingDrawable(R.drawable.pos_none)
             .accuracyAlpha(0.1f)
+            .minZoomIconScale(0.9f)
+            .maxZoomIconScale(1.2f)
             .build()
         val lc = m.locationComponent
         lc.activateLocationComponent(

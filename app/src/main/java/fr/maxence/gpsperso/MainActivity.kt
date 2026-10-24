@@ -789,7 +789,7 @@ class MainActivity : Activity(), Nav.Listener {
 
     /** Icône de position : flèche bleue d'origine, ou véhicule qui tourne avec le cap. */
     private fun positionOptions(): LocationComponentOptions {
-        val icon = positionIconRes() ?: return LocationComponentOptions.builder(this).build()
+        val icon = positionIconRes() ?: return LocationComponentOptions.builder(this).minZoomIconScale(1.0f).maxZoomIconScale(1.5f).build()
         return LocationComponentOptions.builder(this)
             .gpsDrawable(icon)
             .foregroundDrawable(icon)
@@ -798,6 +798,8 @@ class MainActivity : Activity(), Nav.Listener {
             .backgroundDrawableStale(R.drawable.pos_none)
             .bearingDrawable(R.drawable.pos_none)
             .accuracyAlpha(0.1f)
+            .minZoomIconScale(0.9f)
+            .maxZoomIconScale(1.2f)
             .build()
     }
 
