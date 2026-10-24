@@ -159,6 +159,25 @@
             android:paddingEnd="12dp"
             android:paddingBottom="12dp">
 
+            <!-- Altitude du sol à la position actuelle, discrète à droite du compteur -->
+            <TextView
+                android:id="@+id/altitudeText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="bottom|start"
+                android:layout_marginStart="72dp"
+                android:layout_marginBottom="4dp"
+                android:background="@drawable/bg_card"
+                android:alpha="0.85"
+                android:elevation="2dp"
+                android:paddingStart="8dp"
+                android:paddingTop="3dp"
+                android:paddingEnd="8dp"
+                android:paddingBottom="3dp"
+                android:textColor="#5F6368"
+                android:textSize="12sp"
+                android:visibility="gone" />
+
             <!-- Panneau de limitation de vitesse de la route actuelle (OpenStreetMap) -->
             <TextView
                 android:id="@+id/speedLimit"

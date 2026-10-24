@@ -53,6 +53,7 @@ object Nav : LocationListener {
         fun onEtaChanged() {}
         fun onMessage(text: String) {}
         fun onSpeedLimit(limit: Int?) {}
+        fun onAltitude(meters: Int?) {}
     }
 
     private lateinit var app: Context
@@ -72,6 +73,11 @@ object Nav : LocationListener {
     var lastLocation: Location? = null; private set
     /** Vitesse maximale de la route actuelle (km/h), si connue. */
     var speedLimit: Int? = null; private set
+    /** Altitude du sol (m) sous la position actuelle. */
+    var altitude: Int? = null; private set
+    private var altitudeAt: Location? = null
+    private var altitudeTime = 0L
+    private var altitudeLoading = false
     var destination: Place? = null; private set
     /** Étape facultative (station, resto) avant la destination. */
     var stop: Place? = null; private set
@@ -180,6 +186,7 @@ object Nav : LocationListener {
             emit { it.onSpeedLimit(limit) }
         }
         emit { it.onLocation(location, first) }
+        maybeUpdateAltitude(location)
         if (navigating) updateNavigation(location) else checkFreeDriveAlerts(location)
         maybeLoadOsmAround(location)
         if (first) periodicRefresh()
@@ -557,6 +564,38 @@ object Nav : LocationListener {
             if (moved || now - lastIncidentsAt > INCIDENTS_REFRESH_MS) {
                 incidentsCenter = loc
                 loadIncidents(listOf(doubleArrayOf(loc.latitude - 0.3, loc.longitude - 0.45, loc.latitude + 0.3, loc.longitude + 0.45)))
+            }
+        }
+    }
+
+    // ---------- Altitude ----------
+
+    /**
+     * Altitude du terrain (modèle numérique Open-Meteo, gratuit, sans clé) : plus juste que
+     * l'altitude GPS brute, décalée d'environ 50 m en France. Rafraîchie tous les 150 m.
+     */
+    private fun maybeUpdateAltitude(loc: Location) {
+        val prev = altitudeAt
+        if (altitudeLoading) return
+        if (prev != null && prev.distanceTo(loc) < 150 && System.currentTimeMillis() - altitudeTime < 10 * 60_000) return
+        altitudeLoading = true
+        altitudeAt = loc
+        altitudeTime = System.currentTimeMillis()
+        io.execute {
+            val meters = try {
+                val url = String.format(java.util.Locale.US, "https://api.open-meteo.com/v1/elevation?latitude=%.5f&longitude=%.5f", loc.latitude, loc.longitude)
+                org.json.JSONObject(Net.request(url, timeoutMs = 8000)).getJSONArray("elevation").getDouble(0).let { Math.round(it).toInt() }
+            } catch (e: Exception) {
+                // Hors ligne : altitude GPS au-dessus du niveau de la mer si le téléphone la fournit
+                if (android.os.Build.VERSION.SDK_INT >= 34 && loc.hasMslAltitude()) Math.round(loc.mslAltitudeMeters).toInt() else null
+            }
+            main.post {
+                altitudeLoading = false
+                if (meters == null) { altitudeAt = null; return@post }
+                if (meters != altitude) {
+                    altitude = meters
+                    emit { it.onAltitude(meters) }
+                }
             }
         }
     }

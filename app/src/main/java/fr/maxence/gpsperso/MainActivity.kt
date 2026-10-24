@@ -161,6 +161,8 @@ class MainActivity : Activity(), Nav.Listener {
                 refreshPoiLayer()
                 refreshBrandLayer()
                 restoreNavigationUi()
+                onAltitude(Nav.altitude)
+                onSpeedLimit(Nav.speedLimit)
             }
             m.addOnMapLongClickListener { latLng ->
                 if (!navigating) showLongPressMenu(latLng.latitude, latLng.longitude)
@@ -871,6 +873,14 @@ class MainActivity : Activity(), Nav.Listener {
     override fun onAlertsChanged() = refreshAlertLayer()
 
     override fun onMessage(text: String) = toast(text)
+
+    override fun onAltitude(meters: Int?) {
+        val v = findViewById<TextView>(R.id.altitudeText)
+        if (meters == null) v.visibility = View.GONE else {
+            v.text = "⛰ $meters m"
+            v.visibility = View.VISIBLE
+        }
+    }
 
     override fun onSpeedLimit(limit: Int?) {
         val v = findViewById<TextView>(R.id.speedLimit)
@@ -1943,7 +1953,8 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "🚦 Limitation de vitesse de la route au-dessus du compteur (rouge si vous dépassez), aussi dans Android Auto.\n" +
+                "⛰ Altitude du lieu où vous êtes, à côté du compteur.\n" +
+                    "🚦 Limitation de vitesse de la route au-dessus du compteur (rouge si vous dépassez), aussi dans Android Auto.\n" +
                     "🗣️ Choix de la voix : voix du téléphone ou voix naturelles Google (☰ › Réglages › Voix et annonces).\n" +
                     "🔊 Bouton sourdine sur la carte : tout, alertes seulement, trajet seulement ou muet.\n" +
                     "ℹ️ Fiches des lieux plus rapides, avec la raison exacte si Google ne répond pas.\n" +
