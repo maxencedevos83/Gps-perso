@@ -8,6 +8,28 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 object Geo {
+    /**
+     * Zoom automatique pendant le guidage : on voit loin sur autoroute, puis la carte
+     * se rapproche à l'approche d'une sortie ou d'un carrefour.
+     */
+    fun autoZoom(speedMs: Float, maneuverDistance: Double): Double {
+        val kmh = speedMs * 3.6
+        val base = when {
+            kmh < 30 -> 17.6
+            kmh < 55 -> 17.0
+            kmh < 80 -> 16.4
+            kmh < 105 -> 15.9
+            else -> 15.4
+        }
+        val near = when {
+            maneuverDistance < 250 -> 17.8
+            maneuverDistance < 600 -> 17.2
+            maneuverDistance < 1200 -> 16.5
+            else -> 0.0
+        }
+        return maxOf(base, near)
+    }
+
     private const val EARTH_RADIUS = 6_371_000.0
     private const val METERS_PER_DEG_LAT = 111_320.0
 

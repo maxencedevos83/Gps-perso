@@ -822,16 +822,48 @@ class MainActivity : Activity(), Nav.Listener {
         val over = Nav.speedLimit?.let { kmh > it + 3 } == true
         speedText.setTextColor(Color.parseColor(if (over) "#D93025" else "#202124"))
         maybeLoadBrandsAround(loc)
+        applyAutoZoom()
     }
 
+
+    private var autoZoomAt = 0L
+    private var autoZoomValue = 0.0
+
+    /**
+     * Caméra de guidage : le véhicule est placé dans le bas de l'écran (on voit loin devant),
+     * vue inclinée, zoom réglé selon la vitesse et la prochaine manœuvre.
+     */
+    private fun followVehicle() {
+        val m = map ?: return
+        if (!locationReady) return
+        val lc = m.locationComponent
+        val h = mapView.height.takeIf { it > 0 } ?: return
+        val bottom = (if (navPanel.visibility == View.VISIBLE) navPanel.height else 0) + insetBottom + dp(8)
+        lc.cameraMode = CameraMode.TRACKING_GPS
+        lc.paddingWhileTracking(doubleArrayOf(0.0, h * 0.42, 0.0, bottom.toDouble()), 600)
+        autoZoomValue = 0.0
+        applyAutoZoom(force = true)
+        lc.tiltWhileTracking(50.0, 600)
+    }
+
+    private fun applyAutoZoom(force: Boolean = false) {
+        val m = map ?: return
+        if (!navigating || !locationReady || m.locationComponent.cameraMode != CameraMode.TRACKING_GPS) return
+        val now = System.currentTimeMillis()
+        if (!force && now - autoZoomAt < 3000) return
+        val speed = lastLocation?.takeIf { it.hasSpeed() }?.speed ?: 0f
+        val target = Geo.autoZoom(speed, Nav.lastProgress?.maneuverDistance ?: Double.MAX_VALUE)
+        if (!force && Math.abs(target - autoZoomValue) < 0.3) return
+        autoZoomAt = now
+        autoZoomValue = target
+        m.locationComponent.zoomWhileTracking(target, 1500)
+    }
 
     private fun recenter() {
         val m = map ?: return
         val loc = lastLocation ?: run { toast("Position GPS pas encore disponible"); return }
         if (navigating && locationReady) {
-            m.locationComponent.cameraMode = CameraMode.TRACKING_GPS
-            m.locationComponent.zoomWhileTracking(17.0)
-            m.locationComponent.tiltWhileTracking(50.0)
+            followVehicle()
         } else {
             m.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(loc.latitude, loc.longitude), 15.0))
         }
@@ -1044,12 +1076,10 @@ class MainActivity : Activity(), Nav.Listener {
         hideSearchResults()
         updateBottomSpacer()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        val m = map ?: return
+        if (map == null) return
         if (locationReady) {
-            m.locationComponent.renderMode = RenderMode.GPS
-            m.locationComponent.cameraMode = CameraMode.TRACKING_GPS
-            m.locationComponent.zoomWhileTracking(17.0)
-            m.locationComponent.tiltWhileTracking(50.0)
+            map?.locationComponent?.renderMode = RenderMode.GPS
+            mapView.post { followVehicle() }
         }
         Nav.lastProgress?.let { onProgress(it) }
     }
@@ -1069,6 +1099,7 @@ class MainActivity : Activity(), Nav.Listener {
         updateBottomSpacer()
         map?.let { m ->
             if (locationReady) {
+                m.locationComponent.paddingWhileTracking(doubleArrayOf(0.0, 0.0, 0.0, 0.0), 0)
                 m.locationComponent.cameraMode = CameraMode.NONE
                 m.locationComponent.renderMode = idleRenderMode()
             }
@@ -2055,7 +2086,8 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "☆ Bouton « Enregistrer » sur l'itinéraire, à la place de Waze (Waze reste dans l'appui long sur la carte).\n" +
+                "🔍 Pendant le guidage, le véhicule est en bas de l'écran et la carte zoome toute seule selon la vitesse et à l'approche des sorties.\n" +
+                    "☆ Bouton « Enregistrer » sur l'itinéraire, à la place de Waze (Waze reste dans l'appui long sur la carte).\n" +
                     "➕ Choisir une autre destination pendant un trajet propose d'en faire une étape.\n" +
                     "🚧 Bison Futé : accidents, travaux et routes fermées sur autoroutes et nationales, sans clé.\n" +
                     "🚦 Trafic HERE en deuxième source (clé gratuite dans ☰ › Réglages › Services connectés).\n" +

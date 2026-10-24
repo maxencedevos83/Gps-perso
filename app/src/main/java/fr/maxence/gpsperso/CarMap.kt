@@ -223,7 +223,23 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
     override fun onLocation(loc: Location, first: Boolean) {
         if (locationReady) map?.locationComponent?.forceLocationUpdate(loc)
         updateSpeed(loc)
-        if (first) applyCamera(animate = false)
+        if (first) applyCamera(animate = false) else maybeAutoZoom(loc)
+    }
+
+    private var autoZoom = 0.0
+    private var autoZoomAt = 0L
+
+    /** Zoom automatique pendant le guidage (vitesse et prochaine sortie). */
+    private fun maybeAutoZoom(loc: Location) {
+        val m = map ?: return
+        if (!following || !locationReady || !Nav.navigating) return
+        val now = System.currentTimeMillis()
+        if (now - autoZoomAt < 3000) return
+        val target = Geo.autoZoom(if (loc.hasSpeed()) loc.speed else 0f, Nav.lastProgress?.maneuverDistance ?: Double.MAX_VALUE)
+        if (Math.abs(target - autoZoom) < 0.3) return
+        autoZoomAt = now
+        autoZoom = target
+        m.locationComponent.zoomWhileTracking(target, 1500)
     }
 
     override fun onRouteReady(r: Route, isReroute: Boolean) {
@@ -404,7 +420,7 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
         val lc = m.locationComponent
         val nav = Nav.navigating
         // La voiture est placée dans le bas de la zone visible pour voir la route devant.
-        val top = visible.top + (if (nav) visible.height() / 3 else 0)
+        val top = visible.top + (if (nav) (visible.height() * 0.45).toInt() else 0)
         val padding = doubleArrayOf(
             visible.left.toDouble(), top.toDouble(),
             (width - visible.right).coerceAtLeast(0).toDouble(), (height - visible.bottom).coerceAtLeast(0).toDouble()
@@ -412,7 +428,9 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
         lc.cameraMode = if (nav) CameraMode.TRACKING_GPS else CameraMode.TRACKING
         val duration = if (animate) 600L else 0L
         lc.paddingWhileTracking(padding, duration)
-        lc.zoomWhileTracking(if (nav) 16.5 else 15.0, duration)
+        val speed = Nav.lastLocation?.takeIf { it.hasSpeed() }?.speed ?: 0f
+        autoZoom = Geo.autoZoom(speed, Nav.lastProgress?.maneuverDistance ?: Double.MAX_VALUE)
+        lc.zoomWhileTracking(if (nav) autoZoom else 15.0, duration)
         lc.tiltWhileTracking(if (nav) 45.0 else 0.0, duration)
     }
 
