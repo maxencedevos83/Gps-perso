@@ -35,8 +35,55 @@ object SpeedLimit {
     @Volatile private var traceOk = false
     @Volatile private var traceResultAt = 0L
 
+    // Limitations HERE le long du trajet en cours (source prioritaire quand une clé HERE est saisie)
+    @Volatile private var herePoints: List<DoubleArray> = emptyList()
+    @Volatile private var hereLimits: IntArray = IntArray(0)
+    private var hereHint = 0
+    private var hereFullScanAt = 0L
+
+    fun setRouteLimits(points: List<DoubleArray>, limits: IntArray) {
+        herePoints = points
+        hereLimits = limits
+        hereHint = 0
+    }
+
+    fun clearRouteLimits() = setRouteLimits(emptyList(), IntArray(0))
+
+    val hasRouteLimits: Boolean get() = herePoints.size >= 2
+
+    /** Limite HERE du tronçon où l'on roule (moins de 30 m du tracé), ou null. */
+    private fun matchHere(loc: Location): Int? {
+        val pts = herePoints
+        val lim = hereLimits
+        if (pts.size < 2 || lim.size != pts.size) return null
+        fun search(from: Int, to: Int): Int {
+            var best = -1
+            var bestDist = 30.0
+            for (i in from until to) {
+                val (_, d) = Geo.projectOnSegment(loc.latitude, loc.longitude, pts[i], pts[i + 1])
+                if (d < bestDist) { bestDist = d; best = i }
+            }
+            return best
+        }
+        // D'abord autour du dernier tronçon reconnu, puis tout le trajet
+        var i = search(maxOf(0, hereHint - 20), minOf(pts.size - 1, hereHint + 400))
+        if (i < 0 && System.currentTimeMillis() - hereFullScanAt > 5_000) {
+            hereFullScanAt = System.currentTimeMillis()
+            i = search(0, pts.size - 1)
+        }
+        if (i < 0) return null
+        hereHint = i
+        return lim[i].takeIf { it > 0 }
+    }
+
     /** Limite en km/h pour la position donnée, ou null si inconnue. Appelé sur le fil principal. */
     fun update(loc: Location): Int? {
+        val here = matchHere(loc)
+        if (here != null) {
+            last = here
+            lastFoundAt = System.currentTimeMillis()
+            return here
+        }
         maybeTrace(loc)
         maybeLoad(loc)
         val now0 = System.currentTimeMillis()

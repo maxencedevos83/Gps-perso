@@ -273,6 +273,12 @@ object Nav : LocationListener {
             try {
                 val r = Net.route(from.latitude, from.longitude, to.lat, to.lon, heading, via)
                 main.post { if (destination === to) onRouteReady(r, isReroute) }
+                if (settings.hasHere) try {
+                    val (pts, limits) = Here.speedLimits(settings.hereKey, from.latitude, from.longitude, to.lat, to.lon, via)
+                    if (destination === to) SpeedLimit.setRouteLimits(pts, limits)
+                } catch (e: Exception) {
+                    if (!isReroute) main.post { emit { it.onMessage("Limitations HERE indisponibles : ${e.message?.take(80)}") } }
+                }
                 try { Net.addLanes(r, from.latitude, from.longitude, to.lat, to.lon, heading, via) } catch (e: Exception) { }
                 if (!isReroute) loadWeather(r)
                 loadOsmForRoute(r)
@@ -320,6 +326,7 @@ object Nav : LocationListener {
         routeAlerts = emptyList()
         lastProgress = null
         weatherWarnings = emptyList()
+        SpeedLimit.clearRouteLimits()
         emit { it.onRouteCleared() }
     }
 

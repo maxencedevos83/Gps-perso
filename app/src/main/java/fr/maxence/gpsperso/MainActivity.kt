@@ -2099,7 +2099,8 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "📍 Position plus stable : même source que Google Maps (GPS + capteurs), carte qui ne fige plus quand les alertes se mettent à jour.\n" +
+                "🚦 Avec une clé HERE (gratuite), les limitations de vitesse du guidage viennent de HERE, bien plus fiables.\n" +
+                    "📍 Position plus stable : même source que Google Maps (GPS + capteurs), carte qui ne fige plus quand les alertes se mettent à jour.\n" +
                     "🚦 Limitation de vitesse plus fiable : la route est reconnue en 1 à 2 secondes.\n" +
                     "🔍 Pendant le guidage, le véhicule est en bas de l'écran et la carte zoome toute seule selon la vitesse et à l'approche des sorties.\n" +
                     "☆ Bouton « Enregistrer » sur l'itinéraire, à la place de Waze (Waze reste dans l'appui long sur la carte).\n" +
@@ -2274,8 +2275,8 @@ class MainActivity : Activity(), Nav.Listener {
         val sheet = Sheet(this).title("🔑  Services connectés", "Clés gratuites, gardées sur ce téléphone")
         sheet.sectionTitle("Trafic TomTom (developer.tomtom.com)")
         val tomtom = sheet.input("Clé API TomTom", settings.tomtomKey)
-        sheet.sectionTitle("Trafic HERE, deuxième source (platform.here.com)")
-        sheet.text("Facultatif : ajoute les incidents HERE à ceux de TomTom. Offre gratuite, sans carte bancaire.", "#5F6368", 13f)
+        sheet.sectionTitle("HERE : limitations de vitesse et trafic (platform.here.com)")
+        sheet.text("Facultatif mais conseillé : limitations de vitesse plus fiables pendant le guidage, et incidents en plus de TomTom. Formule « Limited », gratuite et sans carte bancaire.", "#5F6368", 13f)
         val here = sheet.input("Clé API HERE", settings.hereKey)
         sheet.sectionTitle("Notes et avis Google (facultatif)")
         sheet.text("Sans clé, le bouton « Voir les avis sur Google Maps » reste disponible sur chaque restaurant.", "#5F6368", 13f)
