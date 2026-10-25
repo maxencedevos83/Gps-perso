@@ -45,7 +45,7 @@ object SpeedLimit {
         if (found != null) {
             last = found
             lastFoundAt = now
-        } else if (now - lastFoundAt > 8000) {
+        } else if (now - lastFoundAt > 4000) {
             last = null
         }
         return last
@@ -61,9 +61,9 @@ object SpeedLimit {
         }
         if (traceLoading || trail.size < 2) return
         val now = System.currentTimeMillis()
-        if (now - traceAt < 5_000) return
+        if (now - traceAt < 3_000) return
         val from = traceFrom
-        if (from != null && from.distanceTo(loc) < 40 && now - traceAt < 60_000) return
+        if (from != null && from.distanceTo(loc) < 25 && now - traceAt < 60_000) return
         traceLoading = true
         traceAt = now
         traceFrom = loc

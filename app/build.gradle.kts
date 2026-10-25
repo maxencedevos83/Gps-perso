@@ -62,4 +62,6 @@ dependencies {
     // Android Auto (Car App Library)
     implementation("androidx.car.app:app:1.4.0")
     implementation("androidx.core:core:1.13.1")
+    // Position fusionnée (même source que Google Maps)
+    implementation("com.google.android.gms:play-services-location:21.3.0")
 }

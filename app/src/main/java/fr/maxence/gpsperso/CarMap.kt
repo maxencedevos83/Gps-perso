@@ -368,12 +368,18 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
         if (d == null) destSrc?.setGeoJson(empty) else destSrc?.setGeoJson(Feature.fromGeometry(Point.fromLngLat(d.lon, d.lat)))
     }
 
+    private val layerIo = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
     private fun drawAlerts() {
-        val s = style ?: return
-        val features = Nav.allAlerts().map { a ->
-            Feature.fromGeometry(Point.fromLngLat(a.lon, a.lat)).apply { addStringProperty("color", a.type.color) }
+        if (style == null) return
+        layerIo.execute {
+            val features = Nav.allAlerts().map { a ->
+                Feature.fromGeometry(Point.fromLngLat(a.lon, a.lat)).apply { addStringProperty("color", a.type.color) }
+            }
+            val collection = FeatureCollection.fromFeatures(features)
+            mainHandler.post { style?.getSourceAs<GeoJsonSource>("alerts-src")?.setGeoJson(collection) }
         }
-        s.getSourceAs<GeoJsonSource>("alerts-src")?.setGeoJson(FeatureCollection.fromFeatures(features))
     }
 
     private fun positionIconRes(): Int? = when (Nav.settings.positionIcon) {

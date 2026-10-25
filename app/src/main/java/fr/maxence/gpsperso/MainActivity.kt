@@ -540,17 +540,28 @@ class MainActivity : Activity(), Nav.Listener {
         return bmp
     }
 
+    private val layerIo = Executors.newSingleThreadExecutor()
+    private var alertLayerGeneration = 0
+
+    /** Les milliers de points sont préparés en arrière-plan pour ne pas figer la carte. */
     private fun refreshAlertLayer() {
-        val src = style?.getSourceAs<GeoJsonSource>("alerts-src") ?: return
-        val features = allAlerts().map { a ->
-            Feature.fromGeometry(Point.fromLngLat(a.lon, a.lat)).also {
-                it.addStringProperty("icon", "alert-${a.type.name}")
-                // Libellé court : la vitesse pour un radar, sinon rien (le pictogramme suffit)
-                it.addStringProperty("label", a.detail ?: "")
-                it.addStringProperty("id", a.id)
+        if (style == null) return
+        val generation = ++alertLayerGeneration
+        layerIo.execute {
+            val features = allAlerts().map { a ->
+                Feature.fromGeometry(Point.fromLngLat(a.lon, a.lat)).also {
+                    it.addStringProperty("icon", "alert-${a.type.name}")
+                    // Libellé court : la vitesse pour un radar, sinon rien (le pictogramme suffit)
+                    it.addStringProperty("label", a.detail ?: "")
+                    it.addStringProperty("id", a.id)
+                }
+            }
+            val collection = FeatureCollection.fromFeatures(features)
+            main.post {
+                if (generation != alertLayerGeneration) return@post
+                style?.getSourceAs<GeoJsonSource>("alerts-src")?.setGeoJson(collection)
             }
         }
-        src.setGeoJson(FeatureCollection.fromFeatures(features))
     }
 
     private fun refreshPoiLayer() {
@@ -2088,7 +2099,8 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "🚦 Limitation de vitesse plus fiable : la route est reconnue en 1 à 2 secondes.\n" +
+                "📍 Position plus stable : même source que Google Maps (GPS + capteurs), carte qui ne fige plus quand les alertes se mettent à jour.\n" +
+                    "🚦 Limitation de vitesse plus fiable : la route est reconnue en 1 à 2 secondes.\n" +
                     "🔍 Pendant le guidage, le véhicule est en bas de l'écran et la carte zoome toute seule selon la vitesse et à l'approche des sorties.\n" +
                     "☆ Bouton « Enregistrer » sur l'itinéraire, à la place de Waze (Waze reste dans l'appui long sur la carte).\n" +
                     "➕ Choisir une autre destination pendant un trajet propose d'en faire une étape.\n" +
@@ -2435,6 +2447,7 @@ class MainActivity : Activity(), Nav.Listener {
         Voice.onCloudError = null
         Nav.detach(this)
         io.shutdownNow()
+        layerIo.shutdownNow()
         mapView.onDestroy()
         super.onDestroy()
     }

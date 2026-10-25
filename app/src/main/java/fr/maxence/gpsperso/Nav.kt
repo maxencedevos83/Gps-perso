@@ -161,9 +161,41 @@ object Nav : LocationListener {
         if (owners.isEmpty() && !navigating) stopLocation()
     }
 
+    private var fusedClient: com.google.android.gms.location.FusedLocationProviderClient? = null
+    private val fusedCallback = object : com.google.android.gms.location.LocationCallback() {
+        override fun onLocationResult(result: com.google.android.gms.location.LocationResult) {
+            result.lastLocation?.let { onLocationChanged(it) }
+        }
+    }
+
+    /**
+     * Position « fusionnée » des services Google, comme Google Maps : GPS + capteurs du téléphone,
+     * plus stable (tunnels, villes) que le GPS brut. Repli sur le GPS brut si indisponible.
+     */
     @SuppressLint("MissingPermission")
     fun startLocation() {
         if (locating || !hasLocationPermission()) return
+        val lm = app.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        val providers = lm.getProviders(true)
+        locating = true
+        try {
+            val client = com.google.android.gms.location.LocationServices.getFusedLocationProviderClient(app)
+            val request = com.google.android.gms.location.LocationRequest.Builder(
+                com.google.android.gms.location.Priority.PRIORITY_HIGH_ACCURACY, 1000L
+            ).setMinUpdateIntervalMillis(500L).setWaitForAccurateLocation(false).build()
+            client.requestLocationUpdates(request, fusedCallback, Looper.getMainLooper())
+                .addOnFailureListener { fusedClient = null; startRawGps() }
+            fusedClient = client
+        } catch (e: Throwable) {
+            fusedClient = null
+            startRawGps()
+        }
+        val last = providers.mapNotNull { lm.getLastKnownLocation(it) }.maxByOrNull { it.time }
+        if (last != null && lastLocation == null) onLocationChanged(last)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startRawGps() {
         val lm = app.getSystemService(Context.LOCATION_SERVICE) as LocationManager
         val providers = lm.getProviders(true)
         if (LocationManager.GPS_PROVIDER in providers) {
@@ -172,13 +204,12 @@ object Nav : LocationListener {
         if (LocationManager.NETWORK_PROVIDER in providers) {
             lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 5000L, 0f, this, Looper.getMainLooper())
         }
-        locating = true
-        val last = providers.mapNotNull { lm.getLastKnownLocation(it) }.maxByOrNull { it.time }
-        if (last != null && lastLocation == null) onLocationChanged(last)
     }
 
     private fun stopLocation() {
         if (!locating) return
+        try { fusedClient?.removeLocationUpdates(fusedCallback) } catch (e: Throwable) { }
+        fusedClient = null
         (app.getSystemService(Context.LOCATION_SERVICE) as LocationManager).removeUpdates(this)
         locating = false
     }
@@ -188,6 +219,10 @@ object Nav : LocationListener {
         // On ignore la position réseau (imprécise) si le GPS a répondu récemment.
         if (location.provider == LocationManager.NETWORK_PROVIDER && previous != null &&
             previous.provider == LocationManager.GPS_PROVIDER && location.time - previous.time < 10_000
+        ) return
+        // Position très imprécise juste après une bonne : on l'ignore (évite les sauts sur la carte).
+        if (previous != null && location.hasAccuracy() && location.accuracy > 80 &&
+            previous.hasAccuracy() && previous.accuracy < 30 && location.time - previous.time < 8_000
         ) return
         val first = previous == null
         lastLocation = location
@@ -383,8 +418,8 @@ object Nav : LocationListener {
             return
         }
         val dLat = 0.006
-        val candidate = allAlerts()
-            .filter { Math.abs(it.lat - loc.latitude) < dLat && Math.abs(it.lon - loc.longitude) < dLat * 1.6 && isAnnounced(it) }
+        val candidate = alertsNear(loc.latitude, loc.longitude)
+            .filter { Math.abs(it.lat - loc.latitude) < dLat && Math.abs(it.lon - loc.longitude) < dLat * 1.6 }
             .map { it to Geo.distance(loc.latitude, loc.longitude, it.lat, it.lon) }
             .filter { (a, d) ->
                 d < FREE_DRIVE_ALERT_METERS && (!loc.hasBearing() ||
@@ -421,7 +456,41 @@ object Nav : LocationListener {
     // ---------- Alertes : radars, bornes, incidents, signalements ----------
 
     /** Toutes les alertes connues : radars (Lufop sinon OSM), bornes, incidents TomTom, signalements perso. */
+    @Volatile private var alertsCache: List<Alert>? = null
+    @Volatile private var alertsCacheAt = 0L
+    @Volatile private var alertGrid: Map<Long, List<Alert>> = emptyMap()
+
+    private fun cell(lat: Double, lon: Double): Long =
+        Math.floor(lat / 0.01).toLong() * 100_000L + Math.floor(lon / 0.01).toLong()
+
+    /**
+     * Toutes les alertes (radars, incidents, Bison Futé, signalements). Mise en cache : il peut y en
+     * avoir plus de 30 000, et la recalculer à chaque position faisait ramer l'appli.
+     */
     fun allAlerts(): List<Alert> {
+        val now = System.currentTimeMillis()
+        alertsCache?.let { if (now - alertsCacheAt < 60_000) return it }
+        val list = buildAlerts()
+        val grid = HashMap<Long, MutableList<Alert>>()
+        for (a in list) if (isAnnounced(a)) grid.getOrPut(cell(a.lat, a.lon)) { ArrayList() }.add(a)
+        alertGrid = grid
+        alertsCache = list
+        alertsCacheAt = now
+        return list
+    }
+
+    /** Alertes annoncées à proximité (cases de ~1 km autour de la position). */
+    private fun alertsNear(lat: Double, lon: Double): List<Alert> {
+        allAlerts()
+        val grid = alertGrid
+        val cLat = Math.floor(lat / 0.01).toLong()
+        val cLon = Math.floor(lon / 0.01).toLong()
+        val out = ArrayList<Alert>()
+        for (i in -1..1) for (j in -1..1) grid[(cLat + i) * 100_000L + (cLon + j)]?.let { out.addAll(it) }
+        return out
+    }
+
+    private fun buildAlerts(): List<Alert> {
         val lufop = lufopStore.all()
         val hasImportedRadars = lufop.any { it.type != AlertType.BORNE }
         val osm = osmAlerts.filter { it.type == AlertType.BORNE || !hasImportedRadars }
@@ -438,6 +507,7 @@ object Nav : LocationListener {
 
     /** À appeler quand les alertes ont changé (import, signalement, réglage). */
     fun alertsChanged() {
+        alertsCache = null
         emit { it.onAlertsChanged() }
         computeRouteAlerts()
     }
