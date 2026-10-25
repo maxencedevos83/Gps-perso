@@ -386,6 +386,7 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
         "voiture_rouge" -> R.drawable.pos_car_red
         "voiture_noire" -> R.drawable.pos_car_black
         "voiture_bleue" -> R.drawable.pos_car_blue
+        "voiture_blanche" -> R.drawable.pos_car_white
         "moto" -> R.drawable.pos_moto
         "camion" -> R.drawable.pos_truck
         else -> null

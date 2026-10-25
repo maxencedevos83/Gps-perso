@@ -92,6 +92,15 @@ class Settings(context: Context) {
         get() = prefs.getFloat("tts_pitch", 1f)
         set(v) = prefs.edit().putFloat("tts_pitch", v).apply()
 
+    /** Options d'itinéraire. */
+    var avoidTolls: Boolean
+        get() = prefs.getBoolean("avoid_tolls", false)
+        set(v) = prefs.edit().putBoolean("avoid_tolls", v).apply()
+
+    var avoidHighways: Boolean
+        get() = prefs.getBoolean("avoid_highways", false)
+        set(v) = prefs.edit().putBoolean("avoid_highways", v).apply()
+
     /** Dernière version dont on a montré les nouveautés. */
     var seenVersion: Int
         get() = prefs.getInt("seen_version", 0)

@@ -793,6 +793,7 @@ class MainActivity : Activity(), Nav.Listener {
         "voiture_rouge" -> R.drawable.pos_car_red
         "voiture_noire" -> R.drawable.pos_car_black
         "voiture_bleue" -> R.drawable.pos_car_blue
+        "voiture_blanche" -> R.drawable.pos_car_white
         "moto" -> R.drawable.pos_moto
         "camion" -> R.drawable.pos_truck
         else -> null
@@ -1030,7 +1031,14 @@ class MainActivity : Activity(), Nav.Listener {
         }
         val weather = Nav.weatherWarnings.take(3).joinToString("") { "\n" + it.line }
         val via = Nav.stop?.let { "\nÉtape : ${it.name}" } ?: ""
-        routeDetails.text = "Arrivée vers $arrival$traffic$via$weather"
+        val avoid = listOfNotNull(if (settings.avoidTolls) "sans péage" else null, if (settings.avoidHighways) "sans autoroute" else null)
+        val tolls = when {
+            r.tollCost != null && r.tollCost!! > 0.05 -> "\n💶 Péages : " + String.format(Locale.FRANCE, "%.2f €", r.tollCost)
+            r.hasToll -> "\n💶 Trajet avec péages" + if (settings.hasHere) "" else " (prix : ajoutez une clé HERE)"
+            avoid.isNotEmpty() -> "\n✅ Trajet " + avoid.joinToString(", ")
+            else -> ""
+        }
+        routeDetails.text = "Arrivée vers $arrival$traffic$via$tolls$weather"
     }
 
     override fun onWeather(warnings: List<Weather.Warning>) {
@@ -1861,6 +1869,7 @@ class MainActivity : Activity(), Nav.Listener {
             .sectionTitle("Aller quelque part")
             .item("📅", "Mon agenda", next?.let { "${it.whenLabel()} · ${it.title}" } ?: "Rendez-vous avec une adresse", "#E8F0FE") { showAgenda() }
             .item("🕘", "Adresses récentes", null, "#E8F0FE") { showRecents() }
+            .item("🛣️", "Options d'itinéraire", routeOptionsSummary(), "#E8F0FE") { showRouteOptions() }
             .item("⭐", "Mes POIs", "${poiStore.all().size} lieux enregistrés", "#FEF7E0") { showPoiList() }
             .sectionTitle("Autour de moi / sur le trajet")
             .item("⛽", "Stations-service", "Prix du carburant", "#FCE8E6") { showStations() }
@@ -2099,7 +2108,9 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "🚦 Avec une clé HERE (gratuite), les limitations de vitesse du guidage viennent de HERE, bien plus fiables.\n" +
+                "🛣️ Options d'itinéraire (☰) : éviter les péages ou les autoroutes. Péages indiqués sous le trajet, avec le prix si clé HERE.\n" +
+                    "🚗 Nouvelle voiture blanche, et icônes de véhicule encore plus grandes.\n" +
+                    "🚦 Avec une clé HERE (gratuite), les limitations de vitesse du guidage viennent de HERE, bien plus fiables.\n" +
                     "📍 Position plus stable : même source que Google Maps (GPS + capteurs), carte qui ne fige plus quand les alertes se mettent à jour.\n" +
                     "🚦 Limitation de vitesse plus fiable : la route est reconnue en 1 à 2 secondes.\n" +
                     "🔍 Pendant le guidage, le véhicule est en bas de l'écran et la carte zoome toute seule selon la vitesse et à l'approche des sorties.\n" +
@@ -2146,7 +2157,7 @@ class MainActivity : Activity(), Nav.Listener {
     private fun showSettings() {
         val iconLabels = mapOf(
             "fleche" to "Flèche bleue", "voiture_rouge" to "Voiture rouge", "voiture_noire" to "Voiture noire",
-            "voiture_bleue" to "Voiture bleue", "moto" to "Moto", "camion" to "Camion",
+            "voiture_bleue" to "Voiture bleue", "voiture_blanche" to "Voiture blanche", "moto" to "Moto", "camion" to "Camion",
         )
         val fuelLabel = Nearby.fuels.firstOrNull { it.first == settings.fuel }?.second ?: settings.fuel
         val count = lufopStore.all().size
@@ -2167,7 +2178,7 @@ class MainActivity : Activity(), Nav.Listener {
     private fun showVehicleSettings() {
         val iconLabels = listOf(
             "fleche" to "Flèche bleue", "voiture_rouge" to "Voiture rouge", "voiture_noire" to "Voiture noire",
-            "voiture_bleue" to "Voiture bleue", "moto" to "Moto", "camion" to "Camion",
+            "voiture_bleue" to "Voiture bleue", "voiture_blanche" to "Voiture blanche", "moto" to "Moto", "camion" to "Camion",
         )
         val sheet = Sheet(this).title("🚗  Mon véhicule").sectionTitle("Icône de ma position")
         iconLabels.forEach { (key, label) ->
@@ -2289,6 +2300,33 @@ class MainActivity : Activity(), Nav.Listener {
             Nav.refreshTrafficNow()
             toast("Clés enregistrées")
         }
+        sheet.show()
+    }
+
+    // ---------- Options d'itinéraire ----------
+
+    private fun routeOptionsSummary(): String =
+        listOfNotNull(if (settings.avoidTolls) "Sans péage" else null, if (settings.avoidHighways) "Sans autoroute" else null)
+            .joinToString(" · ").ifEmpty { "Péages et autoroutes autorisés" }
+
+    private fun showRouteOptions() {
+        val sheet = Sheet(this).title("🛣️  Options d'itinéraire", "Le trajet en cours est recalculé")
+        val tolls = switchRow("Éviter les péages", settings.avoidTolls)
+        val highways = switchRow("Éviter les autoroutes", settings.avoidHighways)
+        sheet.view(tolls).view(highways)
+        sheet.text("Le prix des péages s'affiche sous le trajet si une clé HERE est saisie (☰ › Réglages › Services connectés).", "#5F6368", 13f)
+        sheet.onDismiss {
+            if (tolls.isChecked != settings.avoidTolls || highways.isChecked != settings.avoidHighways) {
+                settings.avoidTolls = tolls.isChecked
+                settings.avoidHighways = highways.isChecked
+                if (destination != null) {
+                    routeSummary.text = "Calcul de l'itinéraire…"
+                    Nav.recomputeRoute()
+                }
+                toast(routeOptionsSummary())
+            }
+        }
+        sheet.primary("Terminé") {}
         sheet.show()
     }
 

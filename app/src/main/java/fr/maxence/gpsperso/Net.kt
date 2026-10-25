@@ -158,6 +158,17 @@ object Net {
      * Calcule un itinéraire en voiture. heading (cap actuel) évite de proposer un demi-tour
      * quand on recalcule en roulant.
      */
+    /** Options Valhalla : éviter les péages et/ou les autoroutes (0 = à éviter autant que possible). */
+    var avoidTolls = false
+    var avoidHighways = false
+
+    private fun costingOptions(): JSONObject {
+        val auto = JSONObject()
+        if (avoidTolls) auto.put("use_tolls", 0.0)
+        if (avoidHighways) auto.put("use_highways", 0.0)
+        return JSONObject().put("auto", auto)
+    }
+
     fun route(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double, heading: Float?, via: List<Place> = emptyList()): Route {
         val origin = JSONObject().put("lat", fromLat).put("lon", fromLon)
         if (heading != null) origin.put("heading", heading.toInt()).put("heading_tolerance", 45)
@@ -167,8 +178,10 @@ object Net {
         val body = JSONObject()
             .put("locations", locations)
             .put("costing", "auto")
+            .put("costing_options", costingOptions())
             .put("directions_options", JSONObject().put("language", "fr-FR").put("units", "kilometers"))
         val trip = JSONObject(request(VALHALLA, body.toString())).getJSONObject("trip")
+        var toll = trip.optJSONObject("summary")?.optBoolean("has_toll", false) == true
         // Un trajet avec étape a plusieurs « legs » : on les met bout à bout.
         val legs = trip.getJSONArray("legs")
         val points = ArrayList<DoubleArray>()
@@ -181,6 +194,7 @@ object Net {
             val maneuversJson = leg.getJSONArray("maneuvers")
             for (i in 0 until maneuversJson.length()) {
                 val m = maneuversJson.getJSONObject(i)
+                if (m.optBoolean("toll")) toll = true
                 maneuvers.add(
                     Maneuver(
                         type = m.optInt("type"),
@@ -193,7 +207,7 @@ object Net {
                 )
             }
         }
-        return Route(points, maneuvers, trip.getJSONObject("summary").optDouble("time", 0.0))
+        return Route(points, maneuvers, trip.getJSONObject("summary").optDouble("time", 0.0), toll)
     }
 
     private fun signText(sign: JSONObject): String? {
@@ -216,6 +230,7 @@ object Net {
         val body = JSONObject()
             .put("locations", locations)
             .put("costing", "auto")
+            .put("costing_options", costingOptions())
             .put("format", "osrm")
             .put("directions_options", JSONObject().put("language", "fr-FR").put("units", "kilometers"))
         val json = JSONObject(request(VALHALLA, body.toString()))

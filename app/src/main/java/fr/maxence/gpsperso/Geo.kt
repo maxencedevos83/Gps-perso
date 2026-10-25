@@ -171,7 +171,12 @@ class Route(
     val points: List<DoubleArray>,
     val maneuvers: List<Maneuver>,
     val totalTime: Double,
+    /** Le trajet emprunte une route à péage. */
+    val hasToll: Boolean = false,
 ) {
+    /** Montant total des péages en euros (HERE), si connu. */
+    @Volatile var tollCost: Double? = null
+
     private companion object {
         const val GRID = 0.01
     }

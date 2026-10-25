@@ -257,6 +257,13 @@ object Nav : LocationListener {
         return true
     }
 
+    /** Options d'itinéraire changées : on recalcule le trajet en cours (étape conservée). */
+    fun recomputeRoute() {
+        val loc = lastLocation ?: return
+        val dest = destination ?: return
+        computeRoute(loc, dest, isReroute = navigating)
+    }
+
     fun addStop(place: Place) {
         val loc = lastLocation ?: return
         val dest = destination ?: return
@@ -271,11 +278,15 @@ object Nav : LocationListener {
         val heading = if (from.hasBearing() && from.hasSpeed() && from.speed > 3) from.bearing else null
         io.execute {
             try {
+                Net.avoidTolls = settings.avoidTolls
+                Net.avoidHighways = settings.avoidHighways
                 val r = Net.route(from.latitude, from.longitude, to.lat, to.lon, heading, via)
                 main.post { if (destination === to) onRouteReady(r, isReroute) }
                 if (settings.hasHere) try {
-                    val (pts, limits) = Here.speedLimits(settings.hereKey, from.latitude, from.longitude, to.lat, to.lon, via)
-                    if (destination === to) SpeedLimit.setRouteLimits(pts, limits)
+                    val info = Here.speedLimits(settings.hereKey, from.latitude, from.longitude, to.lat, to.lon, via, settings.avoidTolls, settings.avoidHighways)
+                    if (destination === to) SpeedLimit.setRouteLimits(info.points, info.limits)
+                    r.tollCost = info.tollCost
+                    main.post { if (route === r) emit { it.onEtaChanged() } }
                 } catch (e: Exception) {
                     if (!isReroute) main.post { emit { it.onMessage("Limitations HERE indisponibles : ${e.message?.take(80)}") } }
                 }

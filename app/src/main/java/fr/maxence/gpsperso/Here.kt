@@ -49,18 +49,36 @@ object Here {
      * une seule requête par itinéraire. Renvoie les points du tracé HERE et la limite (km/h,
      * 0 si inconnue) du tronçon qui part de chaque point.
      */
-    fun speedLimits(key: String, fromLat: Double, fromLon: Double, toLat: Double, toLon: Double, via: List<Place>): Pair<List<DoubleArray>, IntArray> {
+    class RouteInfo(val points: List<DoubleArray>, val limits: IntArray, val tollCost: Double?)
+
+    fun speedLimits(
+        key: String, fromLat: Double, fromLon: Double, toLat: Double, toLon: Double, via: List<Place>,
+        avoidTolls: Boolean = false, avoidHighways: Boolean = false,
+    ): RouteInfo {
         val sb = StringBuilder("https://router.hereapi.com/v8/routes?transportMode=car")
         sb.append(String.format(Locale.US, "&origin=%.6f,%.6f&destination=%.6f,%.6f", fromLat, fromLon, toLat, toLon))
         via.forEach { sb.append(String.format(Locale.US, "&via=%.6f,%.6f!passThrough=true", it.lat, it.lon)) }
-        sb.append("&return=polyline&spans=speedLimit&apiKey=").append(Net.enc(key))
+        val avoid = listOfNotNull(if (avoidTolls) "tollRoad" else null, if (avoidHighways) "controlledAccessHighway" else null)
+        if (avoid.isNotEmpty()) sb.append("&avoid[features]=").append(avoid.joinToString(","))
+        sb.append("&return=polyline,tolls&spans=speedLimit&currency=EUR&apiKey=").append(Net.enc(key))
         val route = JSONObject(Net.request(sb.toString(), timeoutMs = 15_000)).optJSONArray("routes")?.optJSONObject(0)
             ?: throw java.io.IOException("HERE : aucun itinéraire")
         val points = ArrayList<DoubleArray>()
         val limits = ArrayList<Int>()
         val sections = route.getJSONArray("sections")
+        var toll = 0.0
+        var tollKnown = false
         for (i in 0 until sections.length()) {
             val section = sections.getJSONObject(i)
+            // Péages : pour chaque gare, le tarif du premier mode de paiement (voiture, classe 1)
+            section.optJSONArray("tolls")?.let { tolls ->
+                for (t in 0 until tolls.length()) {
+                    val fare = tolls.getJSONObject(t).optJSONArray("fares")?.optJSONObject(0) ?: continue
+                    val price = fare.optJSONObject("convertedPrice") ?: fare.optJSONObject("price") ?: continue
+                    val v = price.optDouble("value", Double.NaN)
+                    if (!v.isNaN()) { toll += v; tollKnown = true }
+                }
+            }
             val pts = decodeFlexiblePolyline(section.getString("polyline"))
             val sectionLimits = IntArray(pts.size)
             val spans = section.optJSONArray("spans")
@@ -75,7 +93,7 @@ object Here {
             points.addAll(pts)
             sectionLimits.forEach { limits.add(it) }
         }
-        return points to limits.toIntArray()
+        return RouteInfo(points, limits.toIntArray(), if (tollKnown) toll else if (sections.length() > 0) 0.0 else null)
     }
 
     /** Décodage du format « flexible polyline » de HERE. */
