@@ -106,6 +106,12 @@ class Sheet(private val activity: Activity) {
 
     /** Ligne cliquable : pastille ronde colorée avec une icône, titre, sous-titre, chevron. */
     fun item(icon: String, title: String, subtitle: String? = null, color: String = "#E8F0FE", onClick: () -> Unit): Sheet {
+        content.addView(itemView(icon, title, subtitle, color, onClick))
+        return this
+    }
+
+    /** Même ligne que item(), à placer soi-même (dans un slot qu'on remplit plus tard). */
+    fun itemView(icon: String, title: String, subtitle: String? = null, color: String = "#E8F0FE", onClick: () -> Unit): View {
         val row = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -152,8 +158,7 @@ class Sheet(private val activity: Activity) {
             textSize = 24f
             setTextColor(Color.parseColor("#BDC1C6"))
         })
-        content.addView(row)
-        return this
+        return row
     }
 
     /** Zone vide à remplir plus tard (infos chargées en arrière-plan). */

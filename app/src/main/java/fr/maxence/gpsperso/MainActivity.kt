@@ -220,6 +220,8 @@ class MainActivity : Activity(), Nav.Listener {
         findViewById<View>(R.id.btnMute).setOnClickListener { showMuteMenu() }
         updateMuteButton()
         findViewById<View>(R.id.btnStart).setOnClickListener { startNavigation() }
+        routeSummary.setOnClickListener { if (Nav.routeOptions.size > 1) showRouteChoice() }
+        routeDetails.setOnClickListener { if (Nav.routeOptions.size > 1) showRouteChoice() }
         findViewById<View>(R.id.btnCancel).setOnClickListener { clearRoute() }
         findViewById<View>(R.id.btnStop).setOnClickListener { stopNavigation() }
         findViewById<View>(R.id.btnWaze).setOnClickListener { saveDestination() }
@@ -310,6 +312,17 @@ class MainActivity : Activity(), Nav.Listener {
     }
 
     private fun setupLayers(s: Style) {
+        // Autres trajets proposés, en gris sous le trajet choisi
+        s.addSource(GeoJsonSource("alt-src"))
+        s.addLayer(
+            LineLayer("alt-line", "alt-src").withProperties(
+                PropertyFactory.lineColor("#9AA0A6"),
+                PropertyFactory.lineWidth(7f),
+                PropertyFactory.lineOpacity(0.8f),
+                PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+                PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
+            )
+        )
         s.addSource(GeoJsonSource("route-src"))
         s.addLayer(
             LineLayer("route-casing", "route-src").withProperties(
@@ -965,6 +978,7 @@ class MainActivity : Activity(), Nav.Listener {
 
     override fun onRouteReady(r: Route, isReroute: Boolean) {
         drawRoute(r)
+        drawAlternatives()
         drawDestination(destination)
         io.execute { loadBrandsForRoute(r) }
         if (navigating) return
@@ -1038,7 +1052,8 @@ class MainActivity : Activity(), Nav.Listener {
             avoid.isNotEmpty() -> "\n✅ Trajet " + avoid.joinToString(", ")
             else -> ""
         }
-        routeDetails.text = "Arrivée vers $arrival$traffic$via$tolls$weather"
+        val more = if (Nav.routeOptions.size > 1) "\n🔀 ${Nav.routeOptions.size} trajets possibles · toucher pour choisir" else ""
+        routeDetails.text = "Arrivée vers $arrival$traffic$via$tolls$weather$more"
     }
 
     override fun onWeather(warnings: List<Weather.Warning>) {
@@ -1047,6 +1062,76 @@ class MainActivity : Activity(), Nav.Listener {
     }
 
     override fun onParkingChanged() = refreshParkingLayer()
+
+    // ---------- Choix du trajet ----------
+
+    private var choiceSheet: Sheet? = null
+    private var choiceSlot: LinearLayout? = null
+    private var choiceShownFor: List<Route>? = null
+
+    private fun drawAlternatives() {
+        val src = style?.getSourceAs<GeoJsonSource>("alt-src") ?: return
+        val current = route
+        val alts = if (navigating) emptyList() else Nav.routeOptions.filter { it !== current }
+        src.setGeoJson(FeatureCollection.fromFeatures(alts.map { r ->
+            Feature.fromGeometry(LineString.fromLngLats(r.points.map { Point.fromLngLat(it[1], it[0]) }))
+        }))
+    }
+
+    override fun onRouteOptions(options: List<Route>) {
+        drawAlternatives()
+        if (navigating) return
+        if (choiceSheet != null) renderRouteChoice() else if (choiceShownFor !== options) showRouteChoice()
+    }
+
+    /** Fenêtre « Choisir un trajet » : durée, péages et bouchons de chaque trajet. */
+    private fun showRouteChoice() {
+        val options = Nav.routeOptions
+        if (options.size < 2) return
+        choiceShownFor = options
+        val sheet = Sheet(this).title("🛣️  Choisir un trajet", destination?.name)
+        choiceSlot = sheet.slot()
+        sheet.text(
+            listOfNotNull(
+                if (!settings.hasHere) "Prix des péages : ajoutez une clé HERE gratuite." else null,
+                if (!settings.hasTomTom || !settings.trafficOn) "Bouchons : activez le trafic TomTom." else null,
+            ).joinToString("\n"), "#5F6368", 12.5f
+        )
+        sheet.onDismiss { choiceSheet = null; choiceSlot = null }
+        choiceSheet = sheet
+        renderRouteChoice()
+        sheet.show()
+    }
+
+    private fun renderRouteChoice() {
+        val slot = choiceSlot ?: return
+        val sheet = choiceSheet ?: return
+        val options = Nav.routeOptions
+        slot.removeAllViews()
+        val times = options.map { it.trafficTime ?: it.totalTime }
+        val fastest = times.minOrNull() ?: 0.0
+        options.forEachIndexed { i, r ->
+            val time = times[i]
+            val title = "${Geo.formatDuration(time)} · ${Geo.formatDistance(r.totalDistance)}" +
+                if (time - fastest >= 60) "  (+${Geo.formatDuration(time - fastest)})" else "  ⚡"
+            val tolls = when {
+                r.tollCost != null && r.tollCost!! > 0.05 -> "💶 " + String.format(Locale.FRANCE, "%.2f €", r.tollCost)
+                r.tollCost != null || !r.hasToll -> "💶 sans péage"
+                else -> "💶 péages"
+            }
+            val delay = r.trafficDelay
+            val traffic = when {
+                delay == null -> null
+                delay >= 60 -> "🔴 bouchons +${Geo.formatDuration(delay)}"
+                else -> "🟢 trafic fluide"
+            }
+            val subtitle = listOfNotNull(r.label?.let { "par $it" }, listOfNotNull(tolls, traffic).joinToString(" · ")).joinToString("\n")
+            val selected = r === route
+            slot.addView(sheet.itemView(if (selected) "✓" else "${i + 1}", title, subtitle, if (selected) "#D2E3FC" else "#F1F3F4") {
+                Nav.chooseRoute(r)
+            })
+        }
+    }
 
     private fun fitRoute(r: Route) {
         val bounds = LatLngBounds.Builder()
@@ -1068,6 +1153,8 @@ class MainActivity : Activity(), Nav.Listener {
     private fun clearRoute() = Nav.clearRoute()
 
     override fun onRouteCleared() {
+        choiceShownFor = null
+        style?.getSourceAs<GeoJsonSource>("alt-src")?.setGeoJson(FeatureCollection.fromFeatures(emptyList<Feature>()))
         drawRoute(null)
         drawDestination(null)
         routePanel.visibility = View.GONE
@@ -1090,6 +1177,8 @@ class MainActivity : Activity(), Nav.Listener {
 
     override fun onNavigationStarted() {
         askNotificationPermission()
+        choiceSheet?.dismiss()
+        drawAlternatives()
         routePanel.visibility = View.GONE
         navPanel.visibility = View.VISIBLE
         maneuverBanner.visibility = View.VISIBLE
@@ -2108,7 +2197,8 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "🛣️ Options d'itinéraire (☰) : éviter les péages ou les autoroutes. Péages indiqués sous le trajet, avec le prix si clé HERE.\n" +
+                "🔀 Choix entre plusieurs trajets, avec durée, péages et bouchons pour chacun.\n" +
+                    "🛣️ Options d'itinéraire (☰) : éviter les péages ou les autoroutes. Péages indiqués sous le trajet, avec le prix si clé HERE.\n" +
                     "🚗 Nouvelle voiture blanche, et icônes de véhicule encore plus grandes.\n" +
                     "🚦 Avec une clé HERE (gratuite), les limitations de vitesse du guidage viennent de HERE, bien plus fiables.\n" +
                     "📍 Position plus stable : même source que Google Maps (GPS + capteurs), carte qui ne fige plus quand les alertes se mettent à jour.\n" +

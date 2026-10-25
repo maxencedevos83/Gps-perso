@@ -173,7 +173,23 @@ class Route(
     val totalTime: Double,
     /** Le trajet emprunte une route à péage. */
     val hasToll: Boolean = false,
+    /** Routes principales empruntées (« A7, N113 »). */
+    val label: String? = null,
 ) {
+    /** Durée avec le trafic actuel et retard dû aux bouchons (TomTom), si connus. */
+    @Volatile var trafficTime: Double? = null
+    @Volatile var trafficDelay: Double? = null
+    /** Limitations HERE propres à ce trajet. */
+    @Volatile var herePoints: List<DoubleArray>? = null
+    @Volatile var hereLimits: IntArray? = null
+
+    /** Trois points de passage (25, 50, 75 %) pour faire suivre ce trajet à HERE ou TomTom. */
+    fun samplePlaces(): List<Place> = listOf(0.25, 0.5, 0.75).map { f ->
+        val target = totalDistance * f
+        val i = cumulative.indexOfFirst { it >= target }.let { if (it < 0) points.size - 1 else it }
+        Place("", "", points[i][0], points[i][1])
+    }
+
     /** Montant total des péages en euros (HERE), si connu. */
     @Volatile var tollCost: Double? = null
 

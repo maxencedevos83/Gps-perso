@@ -169,7 +169,11 @@ object Net {
         return JSONObject().put("auto", auto)
     }
 
-    fun route(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double, heading: Float?, via: List<Place> = emptyList()): Route {
+    fun route(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double, heading: Float?, via: List<Place> = emptyList()): Route =
+        routes(fromLat, fromLon, toLat, toLon, heading, via, 0).first()
+
+    /** Itinéraire principal, puis jusqu'à [alternates] trajets différents (Valhalla). */
+    fun routes(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double, heading: Float?, via: List<Place>, alternates: Int): List<Route> {
         val origin = JSONObject().put("lat", fromLat).put("lon", fromLon)
         if (heading != null) origin.put("heading", heading.toInt()).put("heading_tolerance", 45)
         val locations = JSONArray().put(origin)
@@ -180,12 +184,22 @@ object Net {
             .put("costing", "auto")
             .put("costing_options", costingOptions())
             .put("directions_options", JSONObject().put("language", "fr-FR").put("units", "kilometers"))
-        val trip = JSONObject(request(VALHALLA, body.toString())).getJSONObject("trip")
+        if (alternates > 0) body.put("alternates", alternates)
+        val json = JSONObject(request(VALHALLA, body.toString()))
+        val list = arrayListOf(parseTrip(json.getJSONObject("trip")))
+        json.optJSONArray("alternates")?.let { alts ->
+            for (i in 0 until alts.length()) alts.optJSONObject(i)?.optJSONObject("trip")?.let { list += parseTrip(it) }
+        }
+        return list
+    }
+
+    private fun parseTrip(trip: JSONObject): Route {
         var toll = trip.optJSONObject("summary")?.optBoolean("has_toll", false) == true
         // Un trajet avec étape a plusieurs « legs » : on les met bout à bout.
         val legs = trip.getJSONArray("legs")
         val points = ArrayList<DoubleArray>()
         val maneuvers = ArrayList<Maneuver>()
+        val roadLengths = HashMap<String, Double>()
         for (l in 0 until legs.length()) {
             val leg = legs.getJSONObject(l)
             val legPoints = Geo.decodePolyline6(leg.getString("shape"))
@@ -195,6 +209,9 @@ object Net {
             for (i in 0 until maneuversJson.length()) {
                 val m = maneuversJson.getJSONObject(i)
                 if (m.optBoolean("toll")) toll = true
+                m.optJSONArray("street_names")?.optString(0)?.takeIf { it.isNotBlank() }?.let {
+                    roadLengths[it] = (roadLengths[it] ?: 0.0) + m.optDouble("length", 0.0)
+                }
                 maneuvers.add(
                     Maneuver(
                         type = m.optInt("type"),
@@ -207,7 +224,9 @@ object Net {
                 )
             }
         }
-        return Route(points, maneuvers, trip.getJSONObject("summary").optDouble("time", 0.0), toll)
+        // « par A7, N113 » : les deux routes les plus longues du trajet
+        val label = roadLengths.entries.sortedByDescending { it.value }.take(2).joinToString(", ") { it.key }.ifBlank { null }
+        return Route(points, maneuvers, trip.getJSONObject("summary").optDouble("time", 0.0), toll, label)
     }
 
     private fun signText(sign: JSONObject): String? {

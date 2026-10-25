@@ -56,6 +56,7 @@ object Nav : LocationListener {
         fun onAltitude(meters: Int?) {}
         fun onWeather(warnings: List<Weather.Warning>) {}
         fun onParkingChanged() {}
+        fun onRouteOptions(options: List<Route>) {}
     }
 
     private lateinit var app: Context
@@ -272,27 +273,38 @@ object Nav : LocationListener {
         computeRoute(loc, dest, isReroute = true)
     }
 
+    /** Trajets proposés au choix (le premier est le plus rapide selon Valhalla). */
+    var routeOptions: List<Route> = emptyList(); private set
+    private var optionsFrom: Location? = null
+
     private fun computeRoute(from: Location, to: Place, isReroute: Boolean) {
         rerouting = true
         val via = listOfNotNull(stop)
         val heading = if (from.hasBearing() && from.hasSpeed() && from.speed > 3) from.bearing else null
+        val withOptions = !isReroute && via.isEmpty()
         io.execute {
             try {
                 Net.avoidTolls = settings.avoidTolls
                 Net.avoidHighways = settings.avoidHighways
-                val r = Net.route(from.latitude, from.longitude, to.lat, to.lon, heading, via)
-                main.post { if (destination === to) onRouteReady(r, isReroute) }
-                if (settings.hasHere) try {
-                    val info = Here.speedLimits(settings.hereKey, from.latitude, from.longitude, to.lat, to.lon, via, settings.avoidTolls, settings.avoidHighways)
-                    if (destination === to) SpeedLimit.setRouteLimits(info.points, info.limits)
-                    r.tollCost = info.tollCost
-                    main.post { if (route === r) emit { it.onEtaChanged() } }
-                } catch (e: Exception) {
-                    if (!isReroute) main.post { emit { it.onMessage("Limitations HERE indisponibles : ${e.message?.take(80)}") } }
+                val list = Net.routes(from.latitude, from.longitude, to.lat, to.lon, heading, via, if (withOptions) 2 else 0)
+                val r = list.first()
+                main.post {
+                    if (destination !== to) return@post
+                    if (!isReroute) {
+                        routeOptions = if (list.size > 1) list else emptyList()
+                        optionsFrom = from
+                    }
+                    onRouteReady(r, isReroute)
+                    if (routeOptions.size > 1 && !isReroute) emit { it.onRouteOptions(routeOptions) }
                 }
+                enrichRoute(r, from, to, if (via.isEmpty()) r.samplePlaces() else via, applyLimits = true)
                 try { Net.addLanes(r, from.latitude, from.longitude, to.lat, to.lon, heading, via) } catch (e: Exception) { }
                 if (!isReroute) loadWeather(r)
                 loadOsmForRoute(r)
+                // Péages et bouchons de chaque trajet proposé
+                if (list.size > 1) {
+                    list.drop(1).forEach { alt -> enrichRoute(alt, from, to, alt.samplePlaces(), applyLimits = false) }
+                }
             } catch (e: Exception) {
                 main.post {
                     rerouting = false
@@ -301,6 +313,49 @@ object Nav : LocationListener {
                     emit { it.onRouteError(e.message ?: "", isReroute) }
                 }
             }
+        }
+    }
+
+    /** Limitations et prix des péages (HERE), durée avec trafic (TomTom) d'un trajet. Fil d'arrière-plan. */
+    private fun enrichRoute(r: Route, from: Location, to: Place, hereVia: List<Place>, applyLimits: Boolean) {
+        if (settings.hasHere) try {
+            val info = Here.speedLimits(settings.hereKey, from.latitude, from.longitude, to.lat, to.lon, hereVia, settings.avoidTolls, settings.avoidHighways)
+            r.herePoints = info.points
+            r.hereLimits = info.limits
+            r.tollCost = info.tollCost
+            if (applyLimits && route === r) SpeedLimit.setRouteLimits(info.points, info.limits)
+        } catch (e: Exception) {
+            if (applyLimits) main.post { emit { it.onMessage("HERE indisponible : ${e.message?.take(80)}") } }
+        }
+        if (trafficActive() && settings.hasTomTom) try {
+            val eta = TomTom.eta(settings.tomtomKey, from.latitude, from.longitude, to.lat, to.lon, hereVia)
+            r.trafficTime = eta.travelTime
+            r.trafficDelay = eta.delay
+        } catch (e: Exception) {
+            // trafic facultatif
+        }
+        main.post {
+            if (route === r) emit { it.onEtaChanged() }
+            if (r in routeOptions) emit { it.onRouteOptions(routeOptions) }
+        }
+    }
+
+    /** L'utilisateur choisit un autre des trajets proposés. */
+    fun chooseRoute(r: Route) {
+        if (r === route || r !in routeOptions) return
+        val dest = destination ?: return
+        val from = optionsFrom ?: lastLocation ?: return
+        onRouteReady(r, isReroute = false)
+        r.trafficTime?.let { etaSeconds = it }
+        r.trafficDelay?.let { trafficDelay = it }
+        val pts = r.herePoints
+        val lim = r.hereLimits
+        if (pts != null && lim != null) SpeedLimit.setRouteLimits(pts, lim) else SpeedLimit.clearRouteLimits()
+        emit { it.onEtaChanged() }
+        io.execute {
+            try { Net.addLanes(r, from.latitude, from.longitude, dest.lat, dest.lon, null, r.samplePlaces()) } catch (e: Exception) { }
+            loadWeather(r)
+            loadOsmForRoute(r)
         }
     }
 
@@ -337,6 +392,7 @@ object Nav : LocationListener {
         routeAlerts = emptyList()
         lastProgress = null
         weatherWarnings = emptyList()
+        routeOptions = emptyList()
         SpeedLimit.clearRouteLimits()
         emit { it.onRouteCleared() }
     }
@@ -645,10 +701,11 @@ object Nav : LocationListener {
         lastEtaAt = System.currentTimeMillis()
         val key = settings.tomtomKey
         val viaStop = stop
+        val via = listOfNotNull(viaStop).ifEmpty { if (navigating) emptyList() else r.samplePlaces() }
         val remaining = if (navigating) (r.totalDistance - r.project(from.latitude, from.longitude, segmentHint).along) else r.totalDistance
         io.execute {
             try {
-                val eta = TomTom.eta(key, from.latitude, from.longitude, dest.lat, dest.lon, listOfNotNull(viaStop))
+                val eta = TomTom.eta(key, from.latitude, from.longitude, dest.lat, dest.lon, via)
                 main.post {
                     if (route !== r) return@post
                     etaSeconds = eta.travelTime
