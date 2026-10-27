@@ -45,7 +45,7 @@ object Voice : TextToSpeech.OnInitListener {
     private lateinit var app: Context
     private lateinit var settings: Settings
     private val main = Handler(Looper.getMainLooper())
-    private val cloudIo = Executors.newSingleThreadExecutor()
+    private val cloudIo = Bg.pool("voice")
     private var tts: TextToSpeech? = null
     private var ready = false
     private var focusRequest: AudioFocusRequest? = null

@@ -173,7 +173,7 @@ object Net {
         routes(fromLat, fromLon, toLat, toLon, heading, via, 0).first()
 
     /** Itinéraire principal, puis jusqu'à [alternates] trajets différents (Valhalla). */
-    fun routes(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double, heading: Float?, via: List<Place>, alternates: Int): List<Route> {
+    fun routes(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double, heading: Float?, via: List<Place>, alternates: Int, timeoutMs: Int = 30_000): List<Route> {
         val origin = JSONObject().put("lat", fromLat).put("lon", fromLon)
         if (heading != null) origin.put("heading", heading.toInt()).put("heading_tolerance", 45)
         val locations = JSONArray().put(origin)
@@ -185,7 +185,7 @@ object Net {
             .put("costing_options", costingOptions())
             .put("directions_options", JSONObject().put("language", "fr-FR").put("units", "kilometers"))
         if (alternates > 0) body.put("alternates", alternates)
-        val json = JSONObject(request(VALHALLA, body.toString()))
+        val json = JSONObject(request(VALHALLA, body.toString(), timeoutMs = timeoutMs))
         val list = arrayListOf(parseTrip(json.getJSONObject("trip")))
         json.optJSONArray("alternates")?.let { alts ->
             for (i in 0 until alts.length()) alts.optJSONObject(i)?.optJSONObject("trip")?.let { list += parseTrip(it) }

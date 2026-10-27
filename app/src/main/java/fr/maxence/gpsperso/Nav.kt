@@ -66,7 +66,11 @@ object Nav : LocationListener {
     lateinit var recentStore: RecentStore; private set
     lateinit var poiStore: PoiStore; private set
 
-    val io = Executors.newFixedThreadPool(3)
+    val io = Bg.pool("nav", 3)
+    /** Calculs d'itinéraire seuls, pour qu'un recalcul ne reste jamais bloqué derrière OpenStreetMap. */
+    private val routeIo = Bg.pool("route")
+    /** Requêtes Overpass (une à la fois de toute façon, et parfois très longues). */
+    private val osmIo = Bg.pool("osm")
     private val main = Handler(Looper.getMainLooper())
     private val listeners = CopyOnWriteArrayList<Listener>()
     private val owners = HashSet<Any>()
@@ -131,6 +135,7 @@ object Nav : LocationListener {
     fun init(context: Context) {
         if (::app.isInitialized) return
         app = context.applicationContext
+        Bg.init(app)
         settings = Settings(app)
         alertStore = AlertStore(app)
         lufopStore = LufopStore(app)
@@ -227,16 +232,21 @@ object Nav : LocationListener {
         ) return
         val first = previous == null
         lastLocation = location
-        val limit = SpeedLimit.update(location)
-        if (limit != speedLimit) {
-            speedLimit = limit
-            emit { it.onSpeedLimit(limit) }
-        }
-        emit { it.onLocation(location, first) }
-        maybeUpdateAltitude(location)
-        if (navigating) updateNavigation(location) else checkFreeDriveAlerts(location)
-        maybeLoadOsmAround(location)
-        if (first) periodicRefresh()
+        // Une erreur imprévue ici ne doit jamais couper le suivi de la position.
+        try {
+            val limit = SpeedLimit.update(location)
+            if (limit != speedLimit) {
+                speedLimit = limit
+                emit { it.onSpeedLimit(limit) }
+            }
+        } catch (e: Exception) { Bg.record("Erreur évitée (limitation)", e) }
+        try { emit { it.onLocation(location, first) } } catch (e: Exception) { Bg.record("Erreur évitée (carte)", e) }
+        try {
+            maybeUpdateAltitude(location)
+            if (navigating) updateNavigation(location) else checkFreeDriveAlerts(location)
+            maybeLoadOsmAround(location)
+            if (first) periodicRefresh()
+        } catch (e: Exception) { Bg.record("Erreur évitée (guidage)", e) }
     }
 
     override fun onProviderEnabled(provider: String) {}
@@ -277,42 +287,55 @@ object Nav : LocationListener {
     var routeOptions: List<Route> = emptyList(); private set
     private var optionsFrom: Location? = null
 
+    /** Numéro du dernier calcul demandé : un résultat plus ancien est ignoré. */
+    private var routeGen = 0
+    private var rerouteStartedAt = 0L
+
     private fun computeRoute(from: Location, to: Place, isReroute: Boolean) {
         rerouting = true
+        rerouteStartedAt = System.currentTimeMillis()
+        val gen = ++routeGen
         val via = listOfNotNull(stop)
         val heading = if (from.hasBearing() && from.hasSpeed() && from.speed > 3) from.bearing else null
         val withOptions = !isReroute && via.isEmpty()
-        io.execute {
-            try {
+        routeIo.execute {
+            val list = try {
                 Net.avoidTolls = settings.avoidTolls
                 Net.avoidHighways = settings.avoidHighways
-                val list = Net.routes(from.latitude, from.longitude, to.lat, to.lon, heading, via, if (withOptions) 2 else 0)
-                val r = list.first()
-                main.post {
-                    if (destination !== to) return@post
-                    if (!isReroute) {
-                        routeOptions = if (list.size > 1) list else emptyList()
-                        optionsFrom = from
-                    }
-                    onRouteReady(r, isReroute)
-                    if (routeOptions.size > 1 && !isReroute) emit { it.onRouteOptions(routeOptions) }
-                }
-                enrichRoute(r, from, to, if (via.isEmpty()) r.samplePlaces() else via, applyLimits = true)
-                try { Net.addLanes(r, from.latitude, from.longitude, to.lat, to.lon, heading, via) } catch (e: Exception) { }
-                if (!isReroute) loadWeather(r)
-                loadOsmForRoute(r)
-                // Péages et bouchons de chaque trajet proposé
-                if (list.size > 1) {
-                    list.drop(1).forEach { alt -> enrichRoute(alt, from, to, alt.samplePlaces(), applyLimits = false) }
-                }
+                Net.routes(from.latitude, from.longitude, to.lat, to.lon, heading, via, if (withOptions) 2 else 0,
+                    timeoutMs = if (isReroute) 15_000 else 30_000).ifEmpty { throw java.io.IOException("aucun trajet") }
             } catch (e: Exception) {
                 main.post {
+                    if (gen != routeGen) return@post
                     rerouting = false
+                    lastRerouteAt = System.currentTimeMillis()
                     if (destination !== to) return@post
                     startWhenReady = false
                     emit { it.onRouteError(e.message ?: "", isReroute) }
                 }
+                return@execute
             }
+            val r = list.first()
+            main.post {
+                if (gen != routeGen || destination !== to) return@post
+                if (!isReroute) {
+                    routeOptions = if (list.size > 1) list else emptyList()
+                    optionsFrom = from
+                }
+                onRouteReady(r, isReroute)
+                if (routeOptions.size > 1 && !isReroute) emit { it.onRouteOptions(routeOptions) }
+            }
+            // Le reste (limitations, péages, trafic, voies, météo, radars) ne retarde jamais le guidage.
+            io.execute {
+                enrichRoute(r, from, to, if (via.isEmpty()) r.samplePlaces() else via, applyLimits = true)
+                try { Net.addLanes(r, from.latitude, from.longitude, to.lat, to.lon, heading, via) } catch (e: Exception) { }
+                if (!isReroute) loadWeather(r)
+                // Péages et bouchons de chaque trajet proposé
+                if (list.size > 1) {
+                    list.drop(1).forEach { alt -> enrichRoute(alt, from, to, alt.samplePlaces(), applyLimits = false) }
+                }
+            }
+            if (!isReroute) osmIo.execute { loadOsmForRoute(r) }
         }
     }
 
@@ -355,8 +378,8 @@ object Nav : LocationListener {
         io.execute {
             try { Net.addLanes(r, from.latitude, from.longitude, dest.lat, dest.lon, null, r.samplePlaces()) } catch (e: Exception) { }
             loadWeather(r)
-            loadOsmForRoute(r)
         }
+        osmIo.execute { loadOsmForRoute(r) }
     }
 
     private fun onRouteReady(r: Route, isReroute: Boolean) {
@@ -431,6 +454,8 @@ object Nav : LocationListener {
 
         // Hors itinéraire : on recalcule après 3 positions fiables consécutives.
         if (p.offRoute > OFF_ROUTE_METERS && loc.accuracy < 40) offRouteCount++ else offRouteCount = 0
+        // Un recalcul sans réponse depuis 20 s est abandonné, on en relance un.
+        if (rerouting && System.currentTimeMillis() - rerouteStartedAt > 20_000) rerouting = false
         if (offRouteCount >= 3 && !rerouting && System.currentTimeMillis() - lastRerouteAt > 8000) {
             offRouteCount = 0
             computeRoute(loc, dest, isReroute = true)
@@ -626,7 +651,7 @@ object Nav : LocationListener {
         osmCenter = loc
         val d = 0.1 // environ 10 km autour
         val chargers = settings.showChargers
-        io.execute {
+        osmIo.execute {
             try {
                 val found = Net.osmAlerts(loc.latitude - d, loc.longitude - d * 1.5, loc.latitude + d, loc.longitude + d * 1.5, chargers)
                 main.post { mergeOsm(found) }

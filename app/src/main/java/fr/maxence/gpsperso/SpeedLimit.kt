@@ -12,8 +12,8 @@ object SpeedLimit {
 
     private class Way(val points: List<DoubleArray>, val limit: Int?, val forward: Int?, val backward: Int?, val oneway: Boolean)
 
-    private val io = Executors.newSingleThreadExecutor()
-    private val traceIo = Executors.newSingleThreadExecutor()
+    private val io = Bg.pool("limits")
+    private val traceIo = Bg.pool("trace")
     @Volatile private var ways: List<Way> = emptyList()
     private var center: Location? = null
     private var loading = false

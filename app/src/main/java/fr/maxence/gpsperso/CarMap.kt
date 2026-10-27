@@ -368,7 +368,7 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
         if (d == null) destSrc?.setGeoJson(empty) else destSrc?.setGeoJson(Feature.fromGeometry(Point.fromLngLat(d.lon, d.lat)))
     }
 
-    private val layerIo = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private val layerIo = Bg.pool("car-layers")
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     private fun drawAlerts() {

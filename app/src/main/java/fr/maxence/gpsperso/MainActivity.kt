@@ -67,6 +67,7 @@ class MainActivity : Activity(), Nav.Listener {
     companion object {
         private const val STYLE_URL = Offline.STYLE
         private const val STYLE_DARK = "https://tiles.openfreemap.org/styles/dark"
+        private const val REFOLLOW_DELAY_MS = 7_000L
         private const val REQ_LOCATION = 1
         private const val REQ_CALENDAR = 2
         private const val REQ_IMPORT = 3
@@ -98,7 +99,7 @@ class MainActivity : Activity(), Nav.Listener {
     private lateinit var navEta: TextView
     private lateinit var navRemaining: TextView
 
-    private val io = Executors.newFixedThreadPool(3)
+    private val io = Bg.pool("ui", 3)
     private val main = Handler(Looper.getMainLooper())
     private lateinit var settings: Settings
     private lateinit var alertStore: AlertStore
@@ -162,10 +163,14 @@ class MainActivity : Activity(), Nav.Listener {
                 hideSearchResults()
                 handleMapTap(latLng)
             }
+            m.addOnCameraMoveStartedListener { reason ->
+                if (reason == MapLibreMap.OnCameraMoveStartedListener.REASON_API_GESTURE) lastGestureAt = System.currentTimeMillis()
+            }
             m.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(46.6, 2.4), 5.0))
         }
 
         requestLocationPermission()
+        Bg.takeLastCrash()?.let { report -> main.postDelayed({ showCrashReport(report) }, 2500) }
         io.execute {
             importBundledRadars()
             lufopStore.all() // préchargement du cache
@@ -553,7 +558,7 @@ class MainActivity : Activity(), Nav.Listener {
         return bmp
     }
 
-    private val layerIo = Executors.newSingleThreadExecutor()
+    private val layerIo = Bg.pool("layers")
     private var alertLayerGeneration = 0
 
     /** Les milliers de points sont préparés en arrière-plan pour ne pas figer la carte. */
@@ -599,6 +604,7 @@ class MainActivity : Activity(), Nav.Listener {
         m.queryRenderedFeatures(rect, "alerts-clusters").firstOrNull()?.let { cluster ->
             val p = cluster.geometry() as? Point
             if (p != null) {
+                lastGestureAt = System.currentTimeMillis()
                 m.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(p.latitude(), p.longitude()), m.cameraPosition.zoom + 2))
                 return true
             }
@@ -849,7 +855,37 @@ class MainActivity : Activity(), Nav.Listener {
         val over = Nav.speedLimit?.let { kmh > it + 3 } == true
         speedText.setTextColor(Color.parseColor(if (over) "#D93025" else "#202124"))
         maybeLoadBrandsAround(loc)
+        maybeRefollow()
         applyAutoZoom()
+    }
+
+    /** Dernier déplacement de la carte au doigt (ou vue demandée sur un lieu). */
+    private var lastGestureAt = 0L
+
+    /**
+     * Pendant le guidage, la carte revient d'elle-même sur la voiture quelques secondes
+     * après avoir été déplacée au doigt, comme sur Google Maps.
+     */
+    private fun maybeRefollow() {
+        val m = map ?: return
+        if (!navigating || !locationReady) return
+        if (m.locationComponent.cameraMode == CameraMode.TRACKING_GPS) return
+        if (System.currentTimeMillis() - lastGestureAt < REFOLLOW_DELAY_MS) return
+        followVehicle()
+    }
+
+    /** L'appli a eu une erreur la dernière fois : on la montre pour pouvoir me l'envoyer. */
+    private fun showCrashReport(report: String) {
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Problème détecté")
+            .setMessage("L'appli a rencontré une erreur lors de la dernière utilisation. Tu peux copier le rapport pour l'envoyer.\n\n" + report.take(1500))
+            .setPositiveButton("Copier") { _, _ ->
+                val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("Rapport GPS Perso", report))
+                toast("Rapport copié")
+            }
+            .setNegativeButton("Fermer", null)
+            .show()
     }
 
 
@@ -1463,6 +1499,7 @@ class MainActivity : Activity(), Nav.Listener {
 
     private fun showOnMap(lat: Double, lon: Double) {
         if (navigating && locationReady) map?.locationComponent?.cameraMode = CameraMode.NONE
+        lastGestureAt = System.currentTimeMillis() + 12_000 // on laisse le temps de regarder
         map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(lat, lon), 16.0))
     }
 
@@ -2197,7 +2234,9 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "🔀 Choix entre plusieurs trajets, avec durée, péages et bouchons pour chacun.\n" +
+                "🎯 Pendant le guidage, la carte revient seule sur la voiture 7 s après l'avoir déplacée au doigt.\n" +
+                    "🔁 Recalcul plus fiable quand on quitte le trajet (ne reste plus bloqué), et l'appli ne se ferme plus sur une erreur : elle affiche un rapport à copier.\n" +
+                    "🔀 Choix entre plusieurs trajets, avec durée, péages et bouchons pour chacun.\n" +
                     "🛣️ Options d'itinéraire (☰) : éviter les péages ou les autoroutes. Péages indiqués sous le trajet, avec le prix si clé HERE.\n" +
                     "🚗 Nouvelle voiture blanche, et icônes de véhicule encore plus grandes.\n" +
                     "🚦 Avec une clé HERE (gratuite), les limitations de vitesse du guidage viennent de HERE, bien plus fiables.\n" +
