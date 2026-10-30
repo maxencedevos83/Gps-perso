@@ -1405,6 +1405,14 @@ class MainActivity : Activity(), Nav.Listener {
             }
         }
         findViewById<View>(R.id.speedFrame).visibility = if (over) View.VISIBLE else View.GONE
+        findViewById<TextView>(R.id.radarIgnore).apply {
+            visibility = if (dangerZone) View.VISIBLE else View.GONE
+            paintFlags = paintFlags or android.graphics.Paint.UNDERLINE_TEXT_FLAG
+            setOnClickListener {
+                Nav.ignoreAlert(alert.id)
+                toast("Cette zone ne sera plus annoncée")
+            }
+        }
         panel.visibility = View.VISIBLE
     }
 
@@ -2348,7 +2356,8 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "📷 Radar fixe en approche : grand bandeau avec la distance, la limitation et ta vitesse ; tout passe au rouge avec un cadre autour de l'écran si tu vas trop vite.\n" +
+                "⚠️ Zones de danger : annoncées seulement si tu dépasses la limite (réglable dans Radars et alertes), une seule fois tous les 3 km, et bouton « Leurre ? Ne plus annoncer ».\n" +
+                    "📷 Radar fixe en approche : grand bandeau avec la distance, la limitation et ta vitesse ; tout passe au rouge avec un cadre autour de l'écran si tu vas trop vite.\n" +
                     "🛣️ Sorties et bifurcations façon TomTom : vue de l'échangeur, panneaux aux couleurs françaises, numéro de sortie, voies dessinées, barre d'approche, « Puis… » et annonces à 2 km, 1 km et 400 m.\n" +
                     "🎯 La carte revient seule sur la voiture 7 s après l'avoir déplacée au doigt, pendant le guidage comme en navigation libre (voiture au centre).\n" +
                     "🔁 Recalcul plus fiable quand on quitte le trajet (ne reste plus bloqué), et l'appli ne se ferme plus sur une erreur : elle affiche un rapport à copier.\n" +
@@ -2448,6 +2457,27 @@ class MainActivity : Activity(), Nav.Listener {
         val sheet = Sheet(this).title("📷  Radars et alertes", if (count > 0) "$count points Lufop, mis à jour le ${lufopStore.lastImport}" else "Aucune base Lufop pour l'instant")
         val announce = switchRow("Annonces vocales des radars", settings.announceRadars)
         sheet.view(announce)
+        sheet.sectionTitle("Zones de danger")
+        listOf(
+            "exces" to "Seulement si je dépasse la limite (conseillé)",
+            "toutes" to "Toutes les annoncer",
+            "jamais" to "Ne jamais les annoncer",
+        ).forEach { (key, label) ->
+            sheet.item(if (key == settings.dangerMode) "✓" else "⚠️", label, null, "#FFF3E0") {
+                settings.dangerMode = key
+                Nav.alertsChanged()
+                sheet.dismiss()
+                showRadarSettings()
+            }
+        }
+        val ignored = settings.ignoredAlerts.size
+        if (ignored > 0) {
+            sheet.item("🚫", "$ignored zones marquées comme leurres", "Toucher pour les annoncer à nouveau", "#F1F3F4") {
+                Nav.clearIgnoredAlerts()
+                toast("Leurres oubliés")
+                sheet.dismiss()
+            }
+        }
         sheet.sectionTitle("Clé API Lufop")
         val key = sheet.input("Clé API Lufop", settings.lufopKey)
         fun save() {

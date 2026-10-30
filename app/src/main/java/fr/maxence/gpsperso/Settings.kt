@@ -17,6 +17,16 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("show_chargers", true)
         set(v) = prefs.edit().putBoolean("show_chargers", v).apply()
 
+    /** Zones de danger : "toutes", "exces" (seulement si je dépasse la limite) ou "jamais". */
+    var dangerMode: String
+        get() = prefs.getString("danger_mode", "exces") ?: "exces"
+        set(v) = prefs.edit().putString("danger_mode", v).apply()
+
+    /** Alertes marquées comme leurres : plus jamais annoncées. */
+    var ignoredAlerts: Set<String>
+        get() = prefs.getStringSet("ignored_alerts", emptySet())?.toSet() ?: emptySet()
+        set(v) = prefs.edit().putStringSet("ignored_alerts", HashSet(v)).apply()
+
     var announceRadars: Boolean
         get() = prefs.getBoolean("announce_radars", true)
         set(v) = prefs.edit().putBoolean("announce_radars", v).apply()

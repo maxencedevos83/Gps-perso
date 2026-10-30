@@ -137,6 +137,7 @@ object Nav : LocationListener {
         app = context.applicationContext
         Bg.init(app)
         settings = Settings(app)
+        ignoredCache = settings.ignoredAlerts
         alertStore = AlertStore(app)
         lufopStore = LufopStore(app)
         recentStore = RecentStore(app)
@@ -514,7 +515,7 @@ object Nav : LocationListener {
         // Alertes devant soi sur l'itinéraire
         val ahead = routeAlerts
             .map { (a, along) -> a to (along - p.along) }
-            .filter { it.second in -10.0..ALERT_AHEAD_METERS }
+            .filter { it.second in -10.0..ALERT_AHEAD_METERS && wantedNow(it.first, loc) }
             .minByOrNull { it.second }
         showAlert(ahead?.first, ahead?.second)
     }
@@ -545,7 +546,7 @@ object Nav : LocationListener {
             .filter { Math.abs(it.lat - loc.latitude) < dLat && Math.abs(it.lon - loc.longitude) < dLat * 1.6 }
             .map { it to Geo.distance(loc.latitude, loc.longitude, it.lat, it.lon) }
             .filter { (a, d) ->
-                d < FREE_DRIVE_ALERT_METERS && (!loc.hasBearing() ||
+                d < FREE_DRIVE_ALERT_METERS && wantedNow(a, loc) && (!loc.hasBearing() ||
                     Geo.angleDiff(loc.bearing.toDouble(), Geo.bearing(loc.latitude, loc.longitude, a.lat, a.lon)) < 50)
             }
             .minByOrNull { it.second }
@@ -561,6 +562,14 @@ object Nav : LocationListener {
         }
         emit { it.onAlert(alert, distance) }
         if (spoken.add("a-${alert.id}")) {
+            // Zones de danger en chapelet : une seule annonce tous les 3 km (ou 5 min)
+            if (isDangerZone(alert)) {
+                val here = lastLocation
+                val prev = lastDangerSpoken
+                if (here != null && prev != null && here.distanceTo(prev) < 3000 && System.currentTimeMillis() - lastDangerSpokenAt < 300_000) return
+                lastDangerSpoken = here
+                lastDangerSpokenAt = System.currentTimeMillis()
+            }
             val limit = if (alert.detail != null && alert.type != AlertType.BOUCHON) ", limité à ${alert.detail}" else ""
             val length = if (alert.type == AlertType.BOUCHON && alert.detail != null) " sur ${alert.detail}" else ""
             val what = when {
@@ -625,8 +634,43 @@ object Nav : LocationListener {
     fun isAnnounced(a: Alert): Boolean {
         if (!a.type.announce) return false
         val radar = a.type == AlertType.RADAR_FIXE || a.type == AlertType.RADAR_FEU || a.type == AlertType.RADAR_MOBILE
+        if (a.id in ignoredCache) return false
+        if (isDangerZone(a) && settings.dangerMode == "jamais") return false
         return !radar || settings.announceRadars
     }
+
+    @Volatile private var ignoredCache: Set<String> = emptySet()
+
+    fun isDangerZone(a: Alert) = a.description?.contains("zone de danger", ignoreCase = true) == true
+
+    /**
+     * Les zones de danger sont très nombreuses (beaucoup de leurres) : en mode « exces »,
+     * on ne les signale que si l'on roule au-dessus de la limitation.
+     */
+    private fun wantedNow(a: Alert, loc: Location): Boolean {
+        if (!isDangerZone(a) || settings.dangerMode != "exces") return true
+        val limit = a.detail?.let { Regex("\\d{2,3}").find(it)?.value?.toIntOrNull() } ?: speedLimit ?: return false
+        val kmh = if (loc.hasSpeed()) loc.speed * 3.6 else return false
+        return kmh > limit + 2
+    }
+
+    /** « Leurre » : cette alerte ne sera plus jamais annoncée. */
+    fun ignoreAlert(id: String) {
+        settings.ignoredAlerts = settings.ignoredAlerts + id
+        ignoredCache = settings.ignoredAlerts
+        spoken.add("a-$id")
+        showAlert(null, null)
+        alertsChanged()
+    }
+
+    fun clearIgnoredAlerts() {
+        settings.ignoredAlerts = emptySet()
+        ignoredCache = emptySet()
+        alertsChanged()
+    }
+
+    private var lastDangerSpoken: Location? = null
+    private var lastDangerSpokenAt = 0L
 
     /** À appeler quand les alertes ont changé (import, signalement, réglage). */
     fun alertsChanged() {
