@@ -868,10 +868,23 @@ class MainActivity : Activity(), Nav.Listener {
      */
     private fun maybeRefollow() {
         val m = map ?: return
-        if (!navigating || !locationReady) return
+        if (!locationReady) return
+        // Hors guidage, on laisse la carte libre tant qu'un trajet est affiché en aperçu.
+        if (!navigating && route != null) return
         if (m.locationComponent.cameraMode == CameraMode.TRACKING_GPS) return
         if (System.currentTimeMillis() - lastGestureAt < REFOLLOW_DELAY_MS) return
-        followVehicle()
+        if (navigating) followVehicle() else followFree()
+    }
+
+    /** Navigation libre : la voiture reste au centre de l'écran, carte à plat. */
+    private fun followFree() {
+        val m = map ?: return
+        if (!locationReady) return
+        val lc = m.locationComponent
+        lc.cameraMode = CameraMode.TRACKING_GPS
+        lc.paddingWhileTracking(doubleArrayOf(0.0, 0.0, 0.0, 0.0), 600)
+        lc.tiltWhileTracking(0.0, 600)
+        if (m.cameraPosition.zoom < 14.0) lc.zoomWhileTracking(16.0, 1000)
     }
 
     /** L'appli a eu une erreur la dernière fois : on la montre pour pouvoir me l'envoyer. */
@@ -925,8 +938,11 @@ class MainActivity : Activity(), Nav.Listener {
     private fun recenter() {
         val m = map ?: return
         val loc = lastLocation ?: run { toast("Position GPS pas encore disponible"); return }
+        lastGestureAt = 0L
         if (navigating && locationReady) {
             followVehicle()
+        } else if (locationReady && route == null) {
+            followFree()
         } else {
             m.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(loc.latitude, loc.longitude), 15.0))
         }
@@ -1022,6 +1038,8 @@ class MainActivity : Activity(), Nav.Listener {
         routePanel.visibility = View.VISIBLE
         updateBottomSpacer()
         showRouteSummary(r)
+        // Aperçu du trajet : la carte arrête de suivre la voiture le temps de le montrer en entier.
+        if (locationReady) map?.locationComponent?.cameraMode = CameraMode.NONE
         routePanel.post { fitRoute(r) }
     }
 
@@ -2234,7 +2252,7 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "🎯 Pendant le guidage, la carte revient seule sur la voiture 7 s après l'avoir déplacée au doigt.\n" +
+                "🎯 La carte revient seule sur la voiture 7 s après l'avoir déplacée au doigt, pendant le guidage comme en navigation libre (voiture au centre).\n" +
                     "🔁 Recalcul plus fiable quand on quitte le trajet (ne reste plus bloqué), et l'appli ne se ferme plus sur une erreur : elle affiche un rapport à copier.\n" +
                     "🔀 Choix entre plusieurs trajets, avec durée, péages et bouchons pour chacun.\n" +
                     "🛣️ Options d'itinéraire (☰) : éviter les péages ou les autoroutes. Péages indiqués sous le trajet, avec le prix si clé HERE.\n" +
