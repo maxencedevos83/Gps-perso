@@ -484,13 +484,23 @@ object Nav : LocationListener {
             man = r.maneuvers[index]
             dist = r.cumulative[man.beginIndex] - p.along
             val speedKmh = if (loc.hasSpeed()) loc.speed * 3.6 else 50.0
-            val farThreshold = if (speedKmh > 90) 1500.0 else 500.0
-            val nearThreshold = (speedKmh / 3.6 * 7).coerceIn(40.0, 250.0)
-            if (dist <= farThreshold && dist > farThreshold * 0.5 && dist > nearThreshold * 2 && spoken.add("m-$index-far")) {
-                say("Dans ${Geo.spokenDistance(dist)}, ${man.verbalAlert ?: man.instruction}")
-            }
-            if (dist <= nearThreshold && spoken.add("m-$index-near")) {
-                say(man.verbalPre ?: man.instruction)
+            val what = man.verbalAlert ?: man.instruction
+            if (man.isJunction && (speedKmh > 80 || man.onMotorway)) {
+                // Sortie ou bifurcation sur voie rapide : annonces à 2 km, 1 km (avec les voies) et 400 m
+                if (dist <= 2000 && dist > 1300 && spoken.add("m-$index-2k")) say("Dans 2 kilomètres, $what")
+                if (dist <= 1000 && dist > 600 && spoken.add("m-$index-1k")) {
+                    say("Dans 1 kilomètre, ${laneHint(man) ?: what}")
+                }
+                if (dist <= 400 && spoken.add("m-$index-near")) say(man.verbalPre ?: man.instruction)
+            } else {
+                val farThreshold = if (speedKmh > 90) 1500.0 else 500.0
+                val nearThreshold = (speedKmh / 3.6 * 7).coerceIn(40.0, 250.0)
+                if (dist <= farThreshold && dist > farThreshold * 0.5 && dist > nearThreshold * 2 && spoken.add("m-$index-far")) {
+                    say("Dans ${Geo.spokenDistance(dist)}, $what")
+                }
+                if (dist <= nearThreshold && spoken.add("m-$index-near")) {
+                    say(man.verbalPre ?: man.instruction)
+                }
             }
         }
 
@@ -507,6 +517,20 @@ object Nav : LocationListener {
             .filter { it.second in -10.0..ALERT_AHEAD_METERS }
             .minByOrNull { it.second }
         showAlert(ahead?.first, ahead?.second)
+    }
+
+    /** « Restez sur les 2 voies de droite », quand les bonnes voies sont toutes d'un côté. */
+    private fun laneHint(man: Maneuver): String? {
+        val lanes = man.lanes ?: return null
+        val good = lanes.indices.filter { lanes[it].valid }
+        if (good.isEmpty() || good.size == lanes.size) return null
+        if (good.last() - good.first() + 1 != good.size) return null
+        val side = when {
+            good.last() == lanes.size - 1 -> "de droite"
+            good.first() == 0 -> "de gauche"
+            else -> "du milieu"
+        }
+        return if (good.size == 1) "restez sur la voie $side" else "restez sur les ${good.size} voies $side"
     }
 
     /** Hors guidage : alerte si un danger est proche et devant (selon le cap). */

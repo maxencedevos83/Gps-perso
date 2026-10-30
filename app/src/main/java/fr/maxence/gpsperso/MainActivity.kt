@@ -1253,6 +1253,7 @@ class MainActivity : Activity(), Nav.Listener {
     override fun onNavigationStopped() {
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         maneuverBanner.visibility = View.GONE
+        findViewById<View>(R.id.maneuverThen).visibility = View.GONE
         navPanel.visibility = View.GONE
         alertBanner.visibility = View.GONE
         findViewById<View>(R.id.searchBar).visibility = View.VISIBLE
@@ -1273,13 +1274,35 @@ class MainActivity : Activity(), Nav.Listener {
 
     override fun onProgress(p: Nav.Progress) {
         p.maneuver?.let { man ->
+            val dist = p.maneuverDistance
             maneuverArrow.text = man.arrow
-            maneuverDistance.text = Geo.formatDistance(p.maneuverDistance)
+            maneuverDistance.text = Geo.formatDistance(dist)
             maneuverText.text = man.instruction
+            // Couleur des panneaux français : bleu autoroute, vert route nationale
+            val color = Color.parseColor(man.signColor ?: "#0F7B4B")
+            maneuverBanner.background.mutate().setTint(color)
+            maneuverBanner.clipToOutline = true
             val sign = findViewById<TextView>(R.id.maneuverSign)
-            sign.text = man.sign
-            sign.visibility = if (man.sign.isNullOrBlank()) View.GONE else View.VISIBLE
-            showLanes(man, p.maneuverDistance)
+            val badge = man.exitNumber?.let { "Sortie $it" } ?: man.targetRef
+            sign.text = badge
+            sign.setTextColor(color)
+            sign.visibility = if (badge.isNullOrBlank()) View.GONE else View.VISIBLE
+            // Vue de l'échangeur à l'approche d'une sortie, d'une bifurcation ou d'un rond-point
+            val junction = findViewById<JunctionView>(R.id.junctionView)
+            val junctionRange = if (man.isJunction) 2000.0 else if (man.kind == Maneuver.Kind.ROUNDABOUT) 400.0 else 0.0
+            if (dist <= junctionRange) {
+                junction.maneuver = man
+                junction.visibility = View.VISIBLE
+            } else junction.visibility = View.GONE
+            // Barre qui se vide à l'approche
+            val bar = findViewById<ShrinkBar>(R.id.maneuverBar)
+            val barRange = if (man.isJunction) 2000.0 else 800.0
+            if (dist <= barRange) {
+                bar.fraction = (dist / barRange).toFloat()
+                bar.visibility = View.VISIBLE
+            } else bar.visibility = View.GONE
+            showLanes(man, dist, color)
+            showThen(man, p.nextManeuver)
         }
         val arrival = SimpleDateFormat("HH:mm", Locale.FRANCE).format(Date(p.arrivalMillis))
         navEta.text = "$arrival · ${Geo.formatDuration(p.remainingTime)}"
@@ -1287,23 +1310,30 @@ class MainActivity : Activity(), Nav.Listener {
         navRemaining.text = "${Geo.formatDistance(p.remaining)} restants$traffic"
     }
 
-    /** Voies à prendre (en blanc) à l'approche de la manœuvre, comme sur Google Maps. */
-    private fun showLanes(man: Maneuver, distance: Double) {
-        val v = findViewById<TextView>(R.id.maneuverLanes)
+    /** Voies à prendre (sur fond blanc) à l'approche de la manœuvre, comme sur TomTom. */
+    private fun showLanes(man: Maneuver, distance: Double, color: Int) {
+        val v = findViewById<LanesView>(R.id.maneuverLanes)
         val lanes = man.lanes
         if (lanes.isNullOrEmpty() || distance > 2000) { v.visibility = View.GONE; return }
-        val text = android.text.SpannableStringBuilder()
-        lanes.forEachIndexed { i, lane ->
-            if (i > 0) text.append(" ")
-            val preferred = if (lane.valid) lane.indications.firstOrNull { Lane.laneArrow(it) == man.arrow } else null
-            val start = text.length
-            text.append(lane.arrow(preferred))
-            text.setSpan(
-                android.text.style.ForegroundColorSpan(if (lane.valid) Color.WHITE else Color.parseColor("#7FA7E0")),
-                start, text.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-            )
+        v.accent = color
+        v.setLanes(lanes, man.arrow)
+        v.visibility = View.VISIBLE
+    }
+
+    /** « Puis… » : la manœuvre suivante quand elle arrive juste après. */
+    private fun showThen(man: Maneuver, next: Maneuver?) {
+        val v = findViewById<TextView>(R.id.maneuverThen)
+        val r = route
+        if (next == null || r == null) { v.visibility = View.GONE; return }
+        val gap = r.cumulative.getOrNull(next.beginIndex)?.minus(r.cumulative.getOrNull(man.beginIndex) ?: 0.0) ?: Double.MAX_VALUE
+        if (gap > 1000) { v.visibility = View.GONE; return }
+        val what = when {
+            next.type in 4..6 -> "arrivée"
+            next.exitNumber != null -> "sortie ${next.exitNumber}"
+            next.targetRef != null -> next.targetRef
+            else -> next.instruction
         }
-        v.text = text
+        v.text = "Puis  ${next.arrow}  $what dans ${Geo.formatDistance(gap)}"
         v.visibility = View.VISIBLE
     }
 
@@ -2252,7 +2282,8 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "🎯 La carte revient seule sur la voiture 7 s après l'avoir déplacée au doigt, pendant le guidage comme en navigation libre (voiture au centre).\n" +
+                "🛣️ Sorties et bifurcations façon TomTom : vue de l'échangeur, panneaux aux couleurs françaises, numéro de sortie, voies dessinées, barre d'approche, « Puis… » et annonces à 2 km, 1 km et 400 m.\n" +
+                    "🎯 La carte revient seule sur la voiture 7 s après l'avoir déplacée au doigt, pendant le guidage comme en navigation libre (voiture au centre).\n" +
                     "🔁 Recalcul plus fiable quand on quitte le trajet (ne reste plus bloqué), et l'appli ne se ferme plus sur une erreur : elle affiche un rapport à copier.\n" +
                     "🔀 Choix entre plusieurs trajets, avec durée, péages et bouchons pour chacun.\n" +
                     "🛣️ Options d'itinéraire (☰) : éviter les péages ou les autoroutes. Péages indiqués sous le trajet, avec le prix si clé HERE.\n" +

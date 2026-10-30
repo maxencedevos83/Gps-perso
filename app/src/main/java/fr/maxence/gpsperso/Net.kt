@@ -208,6 +208,7 @@ object Net {
             val maneuversJson = leg.getJSONArray("maneuvers")
             for (i in 0 until maneuversJson.length()) {
                 val m = maneuversJson.getJSONObject(i)
+                val previousStreets = maneuvers.lastOrNull()?.toStreets.orEmpty()
                 if (m.optBoolean("toll")) toll = true
                 m.optJSONArray("street_names")?.optString(0)?.takeIf { it.isNotBlank() }?.let {
                     roadLengths[it] = (roadLengths[it] ?: 0.0) + m.optDouble("length", 0.0)
@@ -220,6 +221,12 @@ object Net {
                         verbalPre = m.optString("verbal_pre_transition_instruction").ifBlank { null },
                         beginIndex = (m.optInt("begin_shape_index") + offset).coerceIn(0, (points.size - 1).coerceAtLeast(0)),
                         sign = m.optJSONObject("sign")?.let { signText(it) },
+                        exitNumber = m.optJSONObject("sign")?.let { signTexts(it, "exit_number_elements").firstOrNull() },
+                        toward = m.optJSONObject("sign")?.let { signTexts(it, "exit_toward_elements") + signTexts(it, "exit_name_elements") }.orEmpty().distinct(),
+                        branch = m.optJSONObject("sign")?.let { signTexts(it, "exit_branch_elements") }.orEmpty(),
+                        fromStreets = strings(m.optJSONArray("begin_street_names")).ifEmpty { previousStreets },
+                        toStreets = strings(m.optJSONArray("street_names")),
+                        roundaboutExit = m.optInt("roundabout_exit_count", 0),
                     )
                 )
             }
@@ -228,6 +235,12 @@ object Net {
         val label = roadLengths.entries.sortedByDescending { it.value }.take(2).joinToString(", ") { it.key }.ifBlank { null }
         return Route(points, maneuvers, trip.getJSONObject("summary").optDouble("time", 0.0), toll, label)
     }
+
+    private fun signTexts(sign: JSONObject, key: String): List<String> =
+        sign.optJSONArray(key)?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it)?.optString("text")?.ifBlank { null } } }.orEmpty()
+
+    private fun strings(a: JSONArray?): List<String> =
+        if (a == null) emptyList() else (0 until a.length()).mapNotNull { a.optString(it).ifBlank { null } }
 
     private fun signText(sign: JSONObject): String? {
         fun texts(key: String) = sign.optJSONArray(key)?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it)?.optString("text")?.ifBlank { null } } }.orEmpty()

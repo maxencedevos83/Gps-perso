@@ -126,9 +126,67 @@ class Maneuver(
     val beginIndex: Int,
     /** Panneau de sortie : « Sortie 12 · Marseille ». */
     val sign: String? = null,
+    /** Numéro de sortie (« 33 »), si connu. */
+    val exitNumber: String? = null,
+    /** Directions indiquées sur le panneau (« Aix-en-Provence », « Marseille »). */
+    val toward: List<String> = emptyList(),
+    /** Routes indiquées sur le panneau (« A7 », « N7 »). */
+    val branch: List<String> = emptyList(),
+    /** Routes avant et après la manœuvre. */
+    val fromStreets: List<String> = emptyList(),
+    val toStreets: List<String> = emptyList(),
+    /** Rond-point : numéro de la sortie à prendre. */
+    val roundaboutExit: Int = 0,
 ) {
     /** Voies à l'approche de la manœuvre (rempli après coup, si connu). */
     @Volatile var lanes: List<Lane>? = null
+
+    enum class Kind { EXIT_RIGHT, EXIT_LEFT, FORK_RIGHT, FORK_LEFT, FORK_STRAIGHT, ROUNDABOUT, OTHER }
+
+    val kind: Kind
+        get() = when (type) {
+            20, 18 -> Kind.EXIT_RIGHT
+            21, 19 -> Kind.EXIT_LEFT
+            23 -> Kind.FORK_RIGHT
+            24 -> Kind.FORK_LEFT
+            22, 17 -> Kind.FORK_STRAIGHT
+            26 -> Kind.ROUNDABOUT
+            else -> Kind.OTHER
+        }
+
+    /** Sortie ou bifurcation (là où un schéma de l'échangeur aide vraiment). */
+    val isJunction: Boolean get() = kind != Kind.OTHER && kind != Kind.ROUNDABOUT
+
+    /** Route principale visée : la référence du panneau, sinon celle de la route suivante. */
+    val targetRef: String? get() = (branch + toStreets).firstOrNull { ROAD_REF.matches(it) }?.replace(" ", "")
+    /** Route actuelle (pour le panneau « tout droit »). */
+    val currentRef: String? get() = fromStreets.firstOrNull { ROAD_REF.matches(it) }?.replace(" ", "")
+
+    /** Couleur des panneaux français : bleu autoroute, vert route nationale/européenne, sinon null. */
+    val signColor: String?
+        get() {
+            val refs = branch + toStreets
+            return when {
+                refs.any { MOTORWAY.matches(it) } -> COLOR_MOTORWAY
+                isJunction && fromStreets.any { MOTORWAY.matches(it) } && toward.isNotEmpty() && refs.none { NATIONAL.matches(it) } -> COLOR_MOTORWAY
+                refs.any { NATIONAL.matches(it) } -> COLOR_NATIONAL
+                else -> null
+            }
+        }
+
+    /** Sur autoroute ou voie rapide au moment de la manœuvre. */
+    val onMotorway: Boolean get() = fromStreets.any { MOTORWAY.matches(it) }
+
+    /** Directions affichées : « Aix-en-Provence, Marseille ». */
+    val towardText: String? get() = toward.take(2).joinToString(", ").ifBlank { null }
+
+    companion object {
+        val ROAD_REF = Regex("^[ANDEM] ?\\d+[A-Za-z]?$")
+        val MOTORWAY = Regex("^A ?\\d+.*")
+        val NATIONAL = Regex("^[NE] ?\\d+.*")
+        const val COLOR_MOTORWAY = "#1A4F9C"
+        const val COLOR_NATIONAL = "#1B7A3E"
+    }
 
     /** Flèche affichée dans le bandeau, d'après les types de manœuvre Valhalla. */
     val arrow: String
