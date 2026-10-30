@@ -372,3 +372,63 @@ class ShrinkBar @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = n
         if (fraction > 0f) c.drawRoundRect(RectF(0f, 0f, width * fraction, height.toFloat()), r, r, paint)
     }
 }
+
+/** Vue d'approche d'un radar fixe : la route, le radar sur le bord et le panneau de limitation. */
+class RadarView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) {
+
+    var limit: Int? = null
+        set(value) { if (field != value) { field = value; invalidate() } }
+    var redLight = false
+        set(value) { if (field != value) { field = value; invalidate() } }
+
+    private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
+    private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.DEFAULT_BOLD; textAlign = Paint.Align.CENTER }
+
+    override fun onDraw(c: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        val horizon = h * 0.4f
+        fill.color = Color.parseColor("#22344A"); c.drawRect(0f, 0f, w, horizon, fill)
+        fill.color = Color.parseColor("#1F2D27"); c.drawRect(0f, horizon, w, h, fill)
+        val cx = w / 2f
+        val road = Path().apply {
+            moveTo(cx - w * 0.4f, h); lineTo(cx + w * 0.4f, h); lineTo(cx + w * 0.04f, horizon); lineTo(cx - w * 0.04f, horizon); close()
+        }
+        fill.color = Color.parseColor("#4A5361"); c.drawPath(road, fill)
+        stroke.color = Color.parseColor("#F5F6F7"); stroke.strokeWidth = w / 130f
+        c.drawLine(cx - w * 0.4f, h, cx - w * 0.04f, horizon, stroke)
+        c.drawLine(cx + w * 0.4f, h, cx + w * 0.04f, horizon, stroke)
+        stroke.color = Color.parseColor("#D9DDE3")
+        for (i in 0 until 6) {
+            val a = i / 6f
+            val b = (i + 0.5f) / 6f
+            c.drawLine(cx, h + (horizon - h) * a, cx, h + (horizon - h) * b, stroke)
+        }
+        // Radar sur son poteau, bord droit
+        val px = cx + w * 0.2f
+        fill.color = Color.parseColor("#8A929C")
+        c.drawRect(px - w * 0.008f, horizon - h * 0.05f, px + w * 0.008f, horizon + h * 0.28f, fill)
+        val box = RectF(px - w * 0.05f, horizon - h * 0.2f, px + w * 0.05f, horizon)
+        fill.color = Color.parseColor("#E9ECEF"); c.drawRoundRect(box, h * 0.02f, h * 0.02f, fill)
+        fill.color = Color.parseColor("#10161F")
+        if (redLight) {
+            fill.color = Color.parseColor("#D93025")
+            c.drawCircle(box.centerX(), box.centerY(), box.height() * 0.28f, fill)
+        } else {
+            c.drawCircle(box.left + box.width() * 0.32f, box.centerY(), box.height() * 0.22f, fill)
+            c.drawRect(box.left + box.width() * 0.6f, box.top + box.height() * 0.3f, box.left + box.width() * 0.85f, box.bottom - box.height() * 0.25f, fill)
+        }
+        // Panneau de limitation
+        val l = limit ?: return
+        val r = h * 0.2f
+        val sx = w - r * 1.5f
+        val sy = r * 1.4f
+        fill.color = Color.WHITE; c.drawCircle(sx, sy, r, fill)
+        stroke.color = Color.parseColor("#D93025"); stroke.strokeWidth = r * 0.22f
+        c.drawCircle(sx, sy, r - stroke.strokeWidth / 2f, stroke)
+        text.color = Color.parseColor("#10161F")
+        text.textSize = r * (if (l >= 100) 0.75f else 0.9f)
+        c.drawText(l.toString(), sx, sy + text.textSize * 0.36f, text)
+    }
+}

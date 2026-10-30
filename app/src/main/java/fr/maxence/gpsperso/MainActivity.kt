@@ -1254,6 +1254,7 @@ class MainActivity : Activity(), Nav.Listener {
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         maneuverBanner.visibility = View.GONE
         findViewById<View>(R.id.maneuverThen).visibility = View.GONE
+        hideRadarPanel()
         navPanel.visibility = View.GONE
         alertBanner.visibility = View.GONE
         findViewById<View>(R.id.searchBar).visibility = View.VISIBLE
@@ -1340,12 +1341,77 @@ class MainActivity : Activity(), Nav.Listener {
     override fun onAlert(alert: Alert?, distance: Double?) {
         if (alert == null || distance == null) {
             alertBanner.visibility = View.GONE
+            hideRadarPanel()
             return
         }
+        if (alert.type == AlertType.RADAR_FIXE || alert.type == AlertType.RADAR_FEU) {
+            alertBanner.visibility = View.GONE
+            showRadarPanel(alert, distance)
+            return
+        }
+        hideRadarPanel()
         alertBanner.text = "⚠  ${alert.title} dans ${Geo.formatDistance(distance.coerceAtLeast(0.0))}"
         alertBanner.setBackgroundResource(R.drawable.bg_alert)
         alertBanner.background.mutate().setTint(Color.parseColor(alert.type.color))
         alertBanner.visibility = View.VISIBLE
+    }
+
+    /** Distance à laquelle le grand bandeau radar commence (la barre part pleine de là). */
+    private var radarStartDistance = 0.0
+    private var radarShownId: String? = null
+
+    /**
+     * Radar fixe en approche : grand bandeau comme pour une sortie, avec la vitesse.
+     * Orange si la vitesse est respectée, rouge avec un cadre autour de l'écran sinon.
+     */
+    private fun showRadarPanel(alert: Alert, distance: Double) {
+        val panel = findViewById<View>(R.id.radarPanel)
+        if (radarShownId != alert.id) {
+            radarShownId = alert.id
+            radarStartDistance = maxOf(distance, 200.0)
+        }
+        val limit = alert.detail?.let { Regex("\\d{2,3}").find(it)?.value?.toIntOrNull() } ?: Nav.speedLimit
+        val speed = lastLocation?.takeIf { it.hasSpeed() }?.let { (it.speed * 3.6f).toInt() }
+        val over = limit != null && speed != null && speed > limit + 2
+        val dangerZone = alert.description?.contains("zone de danger", ignoreCase = true) == true
+        val color = Color.parseColor(if (over) "#B91C1C" else "#C2410C")
+        panel.background.mutate().setTint(color)
+        panel.clipToOutline = true
+        findViewById<RadarView>(R.id.radarView).apply {
+            this.limit = limit
+            redLight = alert.type == AlertType.RADAR_FEU
+        }
+        findViewById<TextView>(R.id.radarDistance).text = Geo.formatDistance(distance.coerceAtLeast(0.0))
+        val what = when {
+            dangerZone -> "Zone de danger"
+            alert.type == AlertType.RADAR_FEU -> "Radar feu rouge"
+            else -> "Radar fixe"
+        }
+        findViewById<TextView>(R.id.radarTitle).text = if (limit != null) "$what · limité à $limit" else what
+        findViewById<ShrinkBar>(R.id.radarBar).fraction = (distance / radarStartDistance).toFloat()
+        findViewById<TextView>(R.id.radarSpeed).text = if (speed != null) "$speed km/h" else "— km/h"
+        val verdict = findViewById<TextView>(R.id.radarVerdict)
+        when {
+            limit == null || speed == null -> verdict.visibility = View.GONE
+            over -> {
+                verdict.visibility = View.VISIBLE
+                verdict.text = "Ralentis : −${speed - limit}"
+                verdict.setTextColor(color)
+            }
+            else -> {
+                verdict.visibility = View.VISIBLE
+                verdict.text = "✓ Vitesse OK"
+                verdict.setTextColor(Color.parseColor("#1B7A3E"))
+            }
+        }
+        findViewById<View>(R.id.speedFrame).visibility = if (over) View.VISIBLE else View.GONE
+        panel.visibility = View.VISIBLE
+    }
+
+    private fun hideRadarPanel() {
+        radarShownId = null
+        findViewById<View>(R.id.radarPanel).visibility = View.GONE
+        findViewById<View>(R.id.speedFrame).visibility = View.GONE
     }
 
     // ---------- Radars, bornes et signalements ----------
@@ -2282,7 +2348,8 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "🛣️ Sorties et bifurcations façon TomTom : vue de l'échangeur, panneaux aux couleurs françaises, numéro de sortie, voies dessinées, barre d'approche, « Puis… » et annonces à 2 km, 1 km et 400 m.\n" +
+                "📷 Radar fixe en approche : grand bandeau avec la distance, la limitation et ta vitesse ; tout passe au rouge avec un cadre autour de l'écran si tu vas trop vite.\n" +
+                    "🛣️ Sorties et bifurcations façon TomTom : vue de l'échangeur, panneaux aux couleurs françaises, numéro de sortie, voies dessinées, barre d'approche, « Puis… » et annonces à 2 km, 1 km et 400 m.\n" +
                     "🎯 La carte revient seule sur la voiture 7 s après l'avoir déplacée au doigt, pendant le guidage comme en navigation libre (voiture au centre).\n" +
                     "🔁 Recalcul plus fiable quand on quitte le trajet (ne reste plus bloqué), et l'appli ne se ferme plus sur une erreur : elle affiche un rapport à copier.\n" +
                     "🔀 Choix entre plusieurs trajets, avec durée, péages et bouchons pour chacun.\n" +
