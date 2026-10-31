@@ -128,6 +128,8 @@ class MainActivity : Activity(), Nav.Listener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Écran toujours allumé tant que l'appli est au premier plan
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         MapLibre.getInstance(this)
         setContentView(R.layout.activity_main)
         Nav.init(this)
@@ -1251,7 +1253,6 @@ class MainActivity : Activity(), Nav.Listener {
     private fun stopNavigation() = Nav.stopNavigation()
 
     override fun onNavigationStopped() {
-        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         maneuverBanner.visibility = View.GONE
         findViewById<View>(R.id.maneuverThen).visibility = View.GONE
         hideRadarPanel()
@@ -2356,7 +2357,8 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "⚠️ Zones de danger : annoncées seulement si tu dépasses la limite (réglable dans Radars et alertes), une seule fois tous les 3 km, et bouton « Leurre ? Ne plus annoncer ».\n" +
+                "🔆 L'écran reste allumé tant que l'appli est ouverte.\n" +
+                    "⚠️ Zones de danger : annoncées seulement si tu dépasses la limite (réglable dans Radars et alertes), une seule fois tous les 3 km, et bouton « Leurre ? Ne plus annoncer ».\n" +
                     "📷 Radar fixe en approche : grand bandeau avec la distance, la limitation et ta vitesse ; tout passe au rouge avec un cadre autour de l'écran si tu vas trop vite.\n" +
                     "🛣️ Sorties et bifurcations façon TomTom : vue de l'échangeur, panneaux aux couleurs françaises, numéro de sortie, voies dessinées, barre d'approche, « Puis… » et annonces à 2 km, 1 km et 400 m.\n" +
                     "🎯 La carte revient seule sur la voiture 7 s après l'avoir déplacée au doigt, pendant le guidage comme en navigation libre (voiture au centre).\n" +
