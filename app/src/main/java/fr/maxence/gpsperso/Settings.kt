@@ -17,6 +17,18 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("show_chargers", true)
         set(v) = prefs.edit().putBoolean("show_chargers", v).apply()
 
+    /** Zoom de la carte pendant le guidage : "tres_proche", "proche" (par défaut) ou "eloigne". */
+    var guidanceZoom: String
+        get() = prefs.getString("guidance_zoom", "proche") ?: "proche"
+        set(v) = prefs.edit().putString("guidance_zoom", v).apply()
+
+    val guidanceZoomBias: Double
+        get() = when (guidanceZoom) {
+            "tres_proche" -> 0.7
+            "eloigne" -> -0.9
+            else -> 0.0
+        }
+
     /** Zones de danger : "toutes", "exces" (seulement si je dépasse la limite) ou "jamais". */
     var dangerMode: String
         get() = prefs.getString("danger_mode", "exces") ?: "exces"
