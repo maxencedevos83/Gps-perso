@@ -235,7 +235,7 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
         if (!following || !locationReady || !Nav.navigating) return
         val now = System.currentTimeMillis()
         if (now - autoZoomAt < 3000) return
-        val target = Geo.autoZoom(if (loc.hasSpeed()) loc.speed else 0f, Nav.lastProgress?.maneuverDistance ?: Double.MAX_VALUE)
+        val target = Geo.autoZoom(if (loc.hasSpeed()) loc.speed else 0f, Nav.lastProgress?.maneuverDistance ?: Double.MAX_VALUE, Nav.settings.guidanceZoomBias)
         if (Math.abs(target - autoZoom) < 0.3) return
         autoZoomAt = now
         autoZoom = target
@@ -438,7 +438,7 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
         val duration = if (animate) 600L else 0L
         lc.paddingWhileTracking(padding, duration)
         val speed = Nav.lastLocation?.takeIf { it.hasSpeed() }?.speed ?: 0f
-        autoZoom = Geo.autoZoom(speed, Nav.lastProgress?.maneuverDistance ?: Double.MAX_VALUE)
+        autoZoom = Geo.autoZoom(speed, Nav.lastProgress?.maneuverDistance ?: Double.MAX_VALUE, Nav.settings.guidanceZoomBias)
         lc.zoomWhileTracking(if (nav) autoZoom else 15.0, duration)
         lc.tiltWhileTracking(if (nav) 45.0 else 0.0, duration)
     }

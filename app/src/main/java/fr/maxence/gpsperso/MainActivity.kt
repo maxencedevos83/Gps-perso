@@ -185,6 +185,7 @@ class MainActivity : Activity(), Nav.Listener {
     private fun bindViews() {
         mapView = findViewById(R.id.mapView)
         topContainer = findViewById(R.id.topContainer)
+        topContainer.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateGuidancePadding(500) }
         bottomContainer = findViewById(R.id.bottomContainer)
         navBarSpacer = findViewById(R.id.navBarSpacer)
         searchInput = findViewById(R.id.searchInput)
@@ -906,31 +907,62 @@ class MainActivity : Activity(), Nav.Listener {
 
     private var autoZoomAt = 0L
     private var autoZoomValue = 0.0
+    private var autoTiltValue = 0.0
+    private var guidanceTopPadding = -1.0
 
     /**
-     * Caméra de guidage : le véhicule est placé dans le bas de l'écran (on voit loin devant),
-     * vue inclinée, zoom réglé selon la vitesse et la prochaine manœuvre.
+     * Caméra de guidage : le véhicule est placé dans le bas de la partie de carte réellement visible
+     * (sous les bandeaux de manœuvre, voies et radar), vue inclinée, zoom réglé selon la vitesse et
+     * la prochaine manœuvre.
      */
     private fun followVehicle() {
         val m = map ?: return
         if (!locationReady) return
         val lc = m.locationComponent
+        if (mapView.height <= 0) return
+        lc.cameraMode = CameraMode.TRACKING_GPS
+        guidanceTopPadding = -1.0
+        updateGuidancePadding(600)
+        autoZoomValue = 0.0
+        autoTiltValue = 0.0
+        applyAutoZoom(force = true)
+    }
+
+    /**
+     * Les bandeaux du haut grandissent à l'approche d'une sortie ou d'un radar : on recalcule la place
+     * de la voiture pour que la route devant elle reste toujours visible entre les bandeaux et le bas.
+     */
+    private fun updateGuidancePadding(duration: Long) {
+        val m = map ?: return
+        if (!navigating || !locationReady || m.locationComponent.cameraMode != CameraMode.TRACKING_GPS) return
         val h = mapView.height.takeIf { it > 0 } ?: return
         val bottom = (if (navPanel.visibility == View.VISIBLE) navPanel.height else 0) + insetBottom + dp(8)
-        lc.cameraMode = CameraMode.TRACKING_GPS
-        lc.paddingWhileTracking(doubleArrayOf(0.0, h * 0.42, 0.0, bottom.toDouble()), 600)
-        autoZoomValue = 0.0
-        applyAutoZoom(force = true)
-        lc.tiltWhileTracking(50.0, 600)
+        val overlayTop = (topContainer.bottom - topContainer.paddingBottom).coerceIn(0, h)
+        val visibleBottom = h - bottom
+        val free = (visibleBottom - overlayTop).coerceAtLeast(dp(120))
+        // Voiture aux 3/4 de la zone libre : on voit la route devant, et un peu derrière
+        val carY = (overlayTop + free * 0.72).coerceAtMost(visibleBottom - dp(40).toDouble())
+        val top = (2 * carY - visibleBottom).coerceAtLeast(0.0)
+        if (Math.abs(top - guidanceTopPadding) < dp(12)) return
+        guidanceTopPadding = top
+        m.locationComponent.paddingWhileTracking(doubleArrayOf(0.0, top, 0.0, bottom.toDouble()), duration)
     }
 
     private fun applyAutoZoom(force: Boolean = false) {
         val m = map ?: return
         if (!navigating || !locationReady || m.locationComponent.cameraMode != CameraMode.TRACKING_GPS) return
         val now = System.currentTimeMillis()
-        if (!force && now - autoZoomAt < 3000) return
+        val dist = Nav.lastProgress?.maneuverDistance ?: Double.MAX_VALUE
+        // Près d'une intersection on réagit plus vite (toutes les secondes au lieu de 3 s)
+        val every = if (dist < 600) 1000 else 3000
+        if (!force && now - autoZoomAt < every) return
         val speed = lastLocation?.takeIf { it.hasSpeed() }?.speed ?: 0f
-        val target = Geo.autoZoom(speed, Nav.lastProgress?.maneuverDistance ?: Double.MAX_VALUE)
+        val target = Geo.autoZoom(speed, dist, settings.guidanceZoomBias)
+        val tilt = Geo.autoTilt(dist)
+        if (tilt != autoTiltValue) {
+            autoTiltValue = tilt
+            m.locationComponent.tiltWhileTracking(tilt, 1200)
+        }
         if (!force && Math.abs(target - autoZoomValue) < 0.3) return
         autoZoomAt = now
         autoZoomValue = target
@@ -1381,6 +1413,8 @@ class MainActivity : Activity(), Nav.Listener {
         findViewById<RadarView>(R.id.radarView).apply {
             this.limit = limit
             redLight = alert.type == AlertType.RADAR_FEU
+            // Vue de l'échangeur déjà affichée : bandeau radar compact pour laisser voir la route
+            visibility = if (findViewById<View>(R.id.junctionView).visibility == View.VISIBLE) View.GONE else View.VISIBLE
         }
         findViewById<TextView>(R.id.radarDistance).text = Geo.formatDistance(distance.coerceAtLeast(0.0))
         val what = when {
@@ -2357,7 +2391,8 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "🔆 L'écran reste allumé tant que l'appli est ouverte.\n" +
+                "🔍 Carte plus rapprochée pendant le guidage, zoom sur la voiture à l'approche des intersections, et la route reste visible sous les bandeaux de sortie, de voies et de radar. Réglable dans Affichage de la carte › Zoom pendant le guidage.\n" +
+                    "🔆 L'écran reste allumé tant que l'appli est ouverte.\n" +
                     "⚠️ Zones de danger : annoncées seulement si tu dépasses la limite (réglable dans Radars et alertes), une seule fois tous les 3 km, et bouton « Leurre ? Ne plus annoncer ».\n" +
                     "📷 Radar fixe en approche : grand bandeau avec la distance, la limitation et ta vitesse ; tout passe au rouge avec un cadre autour de l'écran si tu vas trop vite.\n" +
                     "🛣️ Sorties et bifurcations façon TomTom : vue de l'échangeur, panneaux aux couleurs françaises, numéro de sortie, voies dessinées, barre d'approche, « Puis… » et annonces à 2 km, 1 km et 400 m.\n" +
@@ -2421,7 +2456,7 @@ class MainActivity : Activity(), Nav.Listener {
             .item("🏠", "Ma maison", if (settings.hasHome) settings.homeName else "Non définie", "#E8F0FE") { showHomeSettings() }
             .item("🚗", "Mon véhicule", "${iconLabels[settings.positionIcon]} · $fuelLabel", "#E8F0FE") { showVehicleSettings() }
             .item("📷", "Radars et alertes", if (count > 0) "$count points Lufop · annonces ${if (settings.announceRadars) "activées" else "coupées"}" else "Lufop à configurer", "#F3E8FD") { showRadarSettings() }
-            .item("🗺️", "Affichage de la carte", "Mode nuit, Bison Futé, météo, bornes", "#E6F4EA") { showDisplaySettings() }
+            .item("🗺️", "Affichage de la carte", "Zoom du guidage, mode nuit, Bison Futé, météo, bornes", "#E6F4EA") { showDisplaySettings() }
             .item("🗣️", "Voix et annonces", voiceSummary(), "#FEF7E0") { showVoiceSettings() }
             .item("🔑", "Services connectés", listOfNotNull(
                 if (settings.hasTomTom) "Trafic TomTom ✓" else "Trafic TomTom ✗",
@@ -2528,6 +2563,18 @@ class MainActivity : Activity(), Nav.Listener {
         val bison = switchRow("Bison Futé (accidents, travaux, fermetures)", settings.showBisonFute)
         val weather = switchRow("Météo sur le trajet", settings.showWeather)
         sheet.view(traffic).view(bison).view(weather).view(chargers).view(brands)
+        sheet.sectionTitle("Zoom pendant le guidage")
+        listOf(
+            "tres_proche" to "Très proche",
+            "proche" to "Proche (conseillé)",
+            "eloigne" to "Éloigné (vue large)",
+        ).forEach { (key, label) ->
+            sheet.item(if (key == settings.guidanceZoom) "✓" else "🔍", label, null, "#E8F0FE") {
+                settings.guidanceZoom = key
+                if (navigating) applyAutoZoom(force = true)
+                sheet.dismiss()
+            }
+        }
         sheet.sectionTitle("Mode nuit")
         listOf("auto" to "Automatique (coucher du soleil)", "on" to "Toujours sombre", "off" to "Toujours clair").forEach { (key, label) ->
             sheet.item(if (key == settings.nightMode) "✓" else "🌙", label, null, "#F1F3F4") {

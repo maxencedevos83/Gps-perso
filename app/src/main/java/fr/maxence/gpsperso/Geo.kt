@@ -12,23 +12,31 @@ object Geo {
      * Zoom automatique pendant le guidage : on voit loin sur autoroute, puis la carte
      * se rapproche à l'approche d'une sortie ou d'un carrefour.
      */
-    fun autoZoom(speedMs: Float, maneuverDistance: Double): Double {
+    /**
+     * Zoom de guidage : rapproché selon la vitesse, encore plus à l'approche d'une intersection
+     * pour bien voir la voiture et la route à prendre. [bias] vient du réglage « Zoom du guidage ».
+     */
+    fun autoZoom(speedMs: Float, maneuverDistance: Double, bias: Double = 0.0): Double {
         val kmh = speedMs * 3.6
         val base = when {
-            kmh < 30 -> 17.6
-            kmh < 55 -> 17.0
-            kmh < 80 -> 16.4
-            kmh < 105 -> 15.9
-            else -> 15.4
+            kmh < 30 -> 18.0
+            kmh < 55 -> 17.6
+            kmh < 80 -> 17.1
+            kmh < 105 -> 16.7
+            else -> 16.3
         }
         val near = when {
-            maneuverDistance < 250 -> 17.8
-            maneuverDistance < 600 -> 17.2
-            maneuverDistance < 1200 -> 16.5
+            maneuverDistance < 150 -> 18.7
+            maneuverDistance < 300 -> 18.3
+            maneuverDistance < 600 -> 17.7
+            maneuverDistance < 1200 -> 17.1
             else -> 0.0
         }
-        return maxOf(base, near)
+        return (maxOf(base, near) + bias).coerceIn(14.5, 19.5)
     }
+
+    /** Vue moins inclinée tout près de l'intersection : les rues autour de la voiture se lisent mieux. */
+    fun autoTilt(maneuverDistance: Double): Double = if (maneuverDistance < 300) 35.0 else 50.0
 
     private const val EARTH_RADIUS = 6_371_000.0
     private const val METERS_PER_DEG_LAT = 111_320.0
