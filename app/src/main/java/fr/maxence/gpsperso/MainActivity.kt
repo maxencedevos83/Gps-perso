@@ -1377,7 +1377,7 @@ class MainActivity : Activity(), Nav.Listener {
             hideRadarPanel()
             return
         }
-        if (alert.type == AlertType.RADAR_FIXE || alert.type == AlertType.RADAR_FEU) {
+        if (alert.type == AlertType.RADAR_FIXE || alert.type == AlertType.RADAR_FEU || Nav.isDangerZone(alert)) {
             alertBanner.visibility = View.GONE
             showRadarPanel(alert, distance)
             return
@@ -1413,6 +1413,7 @@ class MainActivity : Activity(), Nav.Listener {
         findViewById<RadarView>(R.id.radarView).apply {
             this.limit = limit
             redLight = alert.type == AlertType.RADAR_FEU
+            danger = dangerZone
             // Vue de l'échangeur déjà affichée : bandeau radar compact pour laisser voir la route
             visibility = if (findViewById<View>(R.id.junctionView).visibility == View.VISIBLE) View.GONE else View.VISIBLE
         }
@@ -1442,7 +1443,6 @@ class MainActivity : Activity(), Nav.Listener {
         findViewById<View>(R.id.speedFrame).visibility = if (over) View.VISIBLE else View.GONE
         findViewById<TextView>(R.id.radarIgnore).apply {
             visibility = if (dangerZone) View.VISIBLE else View.GONE
-            paintFlags = paintFlags or android.graphics.Paint.UNDERLINE_TEXT_FLAG
             setOnClickListener {
                 Nav.ignoreAlert(alert.id)
                 toast("Cette zone ne sera plus annoncée")
@@ -2392,6 +2392,8 @@ class MainActivity : Activity(), Nav.Listener {
             .sectionTitle("Nouveautés")
             .text(
                 "🔍 Carte plus rapprochée pendant le guidage, zoom sur la voiture à l'approche des intersections, et la route reste visible sous les bandeaux de sortie, de voies et de radar. Réglable dans Affichage de la carte › Zoom pendant le guidage.\n" +
+                    "⚠️ Zones de danger : grand bandeau avec le bouton « Leurre ? Ne plus annoncer » (il n'apparaissait jamais).\n" +
+                    "🔄 Rond-points : le schéma suit le vrai angle de la sortie à prendre (tout droit, à gauche, demi-tour…).\n" +
                     "🔆 L'écran reste allumé tant que l'appli est ouverte.\n" +
                     "⚠️ Zones de danger : annoncées seulement si tu dépasses la limite (réglable dans Radars et alertes), une seule fois tous les 3 km, et bouton « Leurre ? Ne plus annoncer ».\n" +
                     "📷 Radar fixe en approche : grand bandeau avec la distance, la limitation et ta vitesse ; tout passe au rouge avec un cadre autour de l'écran si tu vas trop vite.\n" +

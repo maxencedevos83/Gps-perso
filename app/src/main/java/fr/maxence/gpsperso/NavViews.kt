@@ -151,46 +151,69 @@ class JunctionView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? 
         val r = h * 0.26f
         val roadW = h * 0.11f
         val exitNo = m.roundaboutExit.coerceAtLeast(1)
-        val slots = maxOf(exitNo + 1, 4)
-        fun angleOf(k: Int) = Math.toRadians(-90.0 + k * 360.0 / slots)
         fun at(a: Double, d: Float) = floatArrayOf(cx + d * cos(a).toFloat(), cy - d * sin(a).toFloat())
+        // Entrée en bas ; on tourne dans le sens inverse des aiguilles d'une montre (vu du dessus).
+        val entry = -90.0
+        // Angle de la sortie prise : réel (d'après le tracé) si connu, sinon réparti.
+        val real = m.exitAngle
+        val exitDeg = if (real != null) {
+            var a = 90.0 - real
+            while (a <= entry) a += 360.0
+            while (a > entry + 360.0) a -= 360.0
+            a.coerceIn(entry + 15.0, entry + 345.0)
+        } else entry + exitNo * 360.0 / maxOf(exitNo + 1, 4)
+        // Sorties franchies avant la nôtre, réparties entre l'entrée et la sortie prise ;
+        // une route de plus après si la place le permet (en gris : seulement indicative).
+        val arms = ArrayList<Pair<Double, Int>>() // angle en degrés, numéro de sortie (0 = autre)
+        for (k in 1 until exitNo) arms += (entry + (exitDeg - entry) * k / exitNo) to k
+        arms += exitDeg to exitNo
+        if (entry + 360.0 - exitDeg > 100.0) arms += ((exitDeg + entry + 360.0) / 2.0) to 0
 
-        // Branches : entrée en bas, sorties dans le sens inverse des aiguilles d'une montre
         stroke.color = road; stroke.strokeWidth = roadW
-        for (k in 0 until slots) {
-            val p = at(angleOf(k), r)
-            val q = at(angleOf(k), maxOf(w, h))
+        for (deg in listOf(entry) + arms.map { it.first }) {
+            val a = Math.toRadians(deg)
+            val p = at(a, r)
+            val q = at(a, maxOf(w, h))
             c.drawLine(p[0], p[1], q[0], q[1], stroke)
         }
         fill.color = road; c.drawCircle(cx, cy, r + roadW / 2f, fill)
         fill.color = Color.parseColor("#2F4A3A"); c.drawCircle(cx, cy, r - roadW / 2f, fill)
 
-        // Trajet surligné
+        // Trajet surligné : entrée, tour de l'anneau, sortie avec une flèche
         val path = Path()
-        val start = at(angleOf(0), maxOf(w, h))
+        val start = at(Math.toRadians(entry), maxOf(w, h))
         path.moveTo(start[0], start[1])
-        val steps = 40
-        val a0 = angleOf(0)
-        val a1 = angleOf(exitNo)
+        val steps = 48
         for (i in 0..steps) {
-            val a = a0 + (a1 - a0) * i / steps
+            val a = Math.toRadians(entry + (exitDeg - entry) * i / steps)
             val p = at(a, r)
             path.lineTo(p[0], p[1])
         }
-        val end = at(a1, maxOf(w, h) * 0.45f)
+        val exitRad = Math.toRadians(exitDeg)
+        val end = at(exitRad, r + roadW * 2.6f)
         path.lineTo(end[0], end[1])
         stroke.color = highlight; stroke.strokeWidth = roadW * 0.55f
         c.drawPath(path, stroke)
+        val tip = at(exitRad, r + roadW * 3.5f)
+        val side = roadW * 0.6f
+        val px = (sin(exitRad) * side).toFloat()
+        val py = (cos(exitRad) * side).toFloat()
+        fill.color = highlight
+        c.drawPath(Path().apply {
+            moveTo(tip[0], tip[1]); lineTo(end[0] + px, end[1] + py); lineTo(end[0] - px, end[1] - py); close()
+        }, fill)
 
-        // Numéros des sorties
-        for (k in 1 until slots) {
-            val p = at(angleOf(k), r + roadW * 1.6f)
+        // Numéros des sorties (la nôtre en blanc)
+        for ((deg, k) in arms) {
+            if (k == 0) continue
             val chosen = k == exitNo
+            val p = at(Math.toRadians(deg), r + roadW * (if (chosen) 1.7f else 1.5f))
+            val q = if (chosen) at(Math.toRadians(deg + 28.0), r + roadW * 1.9f) else p
             fill.color = if (chosen) Color.WHITE else Color.parseColor("#10161F")
-            c.drawCircle(p[0], p[1], roadW * (if (chosen) 0.48f else 0.4f), fill)
+            c.drawCircle(q[0], q[1], roadW * (if (chosen) 0.5f else 0.4f), fill)
             text.color = if (chosen) Color.parseColor("#10161F") else Color.WHITE
-            text.textSize = roadW * 0.5f
-            c.drawText(k.toString(), p[0], p[1] + text.textSize * 0.36f, text)
+            text.textSize = roadW * (if (chosen) 0.6f else 0.5f)
+            c.drawText(k.toString(), q[0], q[1] + text.textSize * 0.36f, text)
         }
 
         // Panneau de direction
@@ -380,6 +403,9 @@ class RadarView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = n
         set(value) { if (field != value) { field = value; invalidate() } }
     var redLight = false
         set(value) { if (field != value) { field = value; invalidate() } }
+    /** Zone de danger : panneau triangle à la place du radar. */
+    var danger = false
+        set(value) { if (field != value) { field = value; invalidate() } }
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
@@ -405,6 +431,21 @@ class RadarView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = n
             val b = (i + 0.5f) / 6f
             c.drawLine(cx, h + (horizon - h) * a, cx, h + (horizon - h) * b, stroke)
         }
+        if (danger) {
+            // Panneau triangle « danger » sur le bord droit
+            val px = cx + w * 0.2f
+            fill.color = Color.parseColor("#8A929C")
+            c.drawRect(px - w * 0.008f, horizon - h * 0.08f, px + w * 0.008f, horizon + h * 0.28f, fill)
+            val top = horizon - h * 0.36f
+            val size = h * 0.3f
+            val tri = Path().apply { moveTo(px, top); lineTo(px + size * 0.58f, top + size); lineTo(px - size * 0.58f, top + size); close() }
+            fill.color = Color.WHITE; c.drawPath(tri, fill)
+            stroke.color = Color.parseColor("#D93025"); stroke.strokeWidth = size * 0.12f
+            stroke.strokeJoin = Paint.Join.ROUND
+            c.drawPath(tri, stroke)
+            text.color = Color.parseColor("#10161F"); text.textSize = size * 0.55f
+            c.drawText("!", px, top + size * 0.85f, text)
+        } else {
         // Radar sur son poteau, bord droit
         val px = cx + w * 0.2f
         fill.color = Color.parseColor("#8A929C")
@@ -418,6 +459,7 @@ class RadarView @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = n
         } else {
             c.drawCircle(box.left + box.width() * 0.32f, box.centerY(), box.height() * 0.22f, fill)
             c.drawRect(box.left + box.width() * 0.6f, box.top + box.height() * 0.3f, box.left + box.width() * 0.85f, box.bottom - box.height() * 0.25f, fill)
+        }
         }
         // Panneau de limitation
         val l = limit ?: return

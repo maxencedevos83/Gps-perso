@@ -149,6 +149,12 @@ class Maneuver(
     /** Voies à l'approche de la manœuvre (rempli après coup, si connu). */
     @Volatile var lanes: List<Lane>? = null
 
+    /**
+     * Rond-point : direction réelle de la sortie par rapport à l'arrivée, en degrés
+     * dans le sens des aiguilles d'une montre (0 = tout droit, 90 = à droite, -90 = à gauche).
+     */
+    @Volatile var exitAngle: Double? = null
+
     enum class Kind { EXIT_RIGHT, EXIT_LEFT, FORK_RIGHT, FORK_LEFT, FORK_STRAIGHT, ROUNDABOUT, OTHER }
 
     val kind: Kind

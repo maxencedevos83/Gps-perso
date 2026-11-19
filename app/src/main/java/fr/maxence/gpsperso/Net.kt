@@ -233,7 +233,38 @@ object Net {
         }
         // « par A7, N113 » : les deux routes les plus longues du trajet
         val label = roadLengths.entries.sortedByDescending { it.value }.take(2).joinToString(", ") { it.key }.ifBlank { null }
+        setRoundaboutAngles(points, maneuvers)
         return Route(points, maneuvers, trip.getJSONObject("summary").optDouble("time", 0.0), toll, label)
+    }
+
+    /**
+     * Rond-points : angle réel entre la route d'arrivée et la route de sortie, tiré du tracé,
+     * pour que le schéma ressemble au vrai carrefour.
+     */
+    private fun setRoundaboutAngles(points: List<DoubleArray>, maneuvers: List<Maneuver>) {
+        fun pointAt(from: Int, meters: Double, step: Int): Int {
+            var i = from
+            var d = 0.0
+            while (i + step in points.indices && d < meters) {
+                d += Geo.distance(points[i][0], points[i][1], points[i + step][0], points[i + step][1])
+                i += step
+            }
+            return i
+        }
+        for ((k, m) in maneuvers.withIndex()) {
+            if (m.type != 26) continue
+            val exit = maneuvers.drop(k + 1).firstOrNull { it.type == 27 } ?: maneuvers.getOrNull(k + 1) ?: continue
+            val enter = m.beginIndex
+            val before = pointAt(enter, 40.0, -1)
+            val after = pointAt(exit.beginIndex, 40.0, 1)
+            if (before == enter || after == exit.beginIndex) continue
+            val inBearing = Geo.bearing(points[before][0], points[before][1], points[enter][0], points[enter][1])
+            val outBearing = Geo.bearing(points[exit.beginIndex][0], points[exit.beginIndex][1], points[after][0], points[after][1])
+            var delta = outBearing - inBearing
+            while (delta > 180) delta -= 360
+            while (delta <= -180) delta += 360
+            m.exitAngle = delta
+        }
     }
 
     private fun signTexts(sign: JSONObject, key: String): List<String> =
