@@ -135,8 +135,9 @@ class MainActivity : Activity(), Nav.Listener {
         Nav.init(this)
         Nav.addListener(this)
         Voice.onCloudError = { msg ->
-            Sheet(this).title("Voix Google indisponible", "L'appli utilise la voix du téléphone en attendant")
-                .text(googleErrorLabel(Exception(msg)).replace("Places API (New)", "Cloud Text-to-Speech API"))
+            val eleven = settings.voiceSource == "eleven"
+            Sheet(this).title("Voix ${Voice.cloudName()} indisponible", "L'appli utilise la voix du téléphone en attendant")
+                .text(if (eleven) msg else googleErrorLabel(Exception(msg)).replace("Places API (New)", "Cloud Text-to-Speech API"))
                 .text("Détail : ${msg.take(200)}", "#5F6368", 12f)
                 .secondary("Fermer") {}
                 .show()
@@ -2265,8 +2266,11 @@ class MainActivity : Activity(), Nav.Listener {
     }
 
     private fun voiceSummary(): String {
-        val source = if (settings.voiceSource == "google" && settings.hasGoogle)
-            "Google · " + settings.googleVoice.removePrefix("fr-FR-") else "Voix du téléphone"
+        val source = when {
+            settings.voiceSource == "eleven" && settings.hasEleven && settings.elevenVoice.isNotBlank() -> "ElevenLabs · " + settings.elevenVoiceName
+            settings.voiceSource == "google" && settings.hasGoogle -> "Google · " + settings.googleVoice.removePrefix("fr-FR-")
+            else -> "Voix du téléphone"
+        }
         return "$source · " + (Voice.modes.firstOrNull { it.first == settings.voiceMode }?.second ?: "")
     }
 
@@ -2274,21 +2278,33 @@ class MainActivity : Activity(), Nav.Listener {
         val sheet = Sheet(this).title("🗣️  Voix et annonces", voiceSummary())
         sheet.item("🔊", "Annonces", Voice.modes.first { it.first == settings.voiceMode }.second, "#E8F0FE") { showMuteMenu() }
         sheet.sectionTitle("Quelle voix ?")
-        val phone = settings.voiceSource != "google" || !settings.hasGoogle
+        val eleven = settings.voiceSource == "eleven" && settings.hasEleven && settings.elevenVoice.isNotBlank()
+        val google = !eleven && settings.voiceSource == "google" && settings.hasGoogle
+        val phone = !eleven && !google
         sheet.item("📱", "Voix du téléphone", (if (phone) "✓ " else "") + "Gratuite, sans Internet · " + (settings.ttsVoice.ifBlank { "voix par défaut" }), if (phone) "#D2E3FC" else "#F1F3F4") {
             settings.voiceSource = "device"
             showDeviceVoices()
         }
-        sheet.item("✨", "Voix naturelles Google", (if (!phone) "✓ " else "") + if (settings.hasGoogle) settings.googleVoice.removePrefix("fr-FR-") else "Clé Google nécessaire", if (!phone) "#D2E3FC" else "#F1F3F4") {
+        sheet.item("🎙️", "Voix ElevenLabs", (if (eleven) "✓ " else "") + when {
+            !settings.hasEleven -> "Clé ElevenLabs nécessaire (offre gratuite possible)"
+            settings.elevenVoice.isBlank() -> "Choisir une voix"
+            else -> settings.elevenVoiceName
+        }, if (eleven) "#D2E3FC" else "#F1F3F4") {
+            if (!settings.hasEleven) showKeySettings() else showElevenVoices()
+        }
+        sheet.item("✨", "Voix naturelles Google", (if (google) "✓ " else "") + if (settings.hasGoogle) settings.googleVoice.removePrefix("fr-FR-") else "Clé Google nécessaire", if (google) "#D2E3FC" else "#F1F3F4") {
             if (!settings.hasGoogle) showKeySettings() else showGoogleVoices()
         }
-        if (settings.hasGoogle) sheet.item("🩺", "Tester la voix Google", "Vérifie chaque étape et dit où ça bloque", "#F1F3F4") {
+        if (eleven || google) sheet.item("🩺", "Tester la voix ${Voice.cloudName()}", "Vérifie chaque étape et dit où ça bloque", "#F1F3F4") {
             toast("Test en cours…")
             Voice.diagnose { report ->
-                Sheet(this).title("🩺  Test de la voix Google").text(report).secondary("Fermer") {}.show()
+                Sheet(this).title("🩺  Test de la voix ${Voice.cloudName()}").text(report).secondary("Fermer") {}.show()
             }
         }
-        Voice.lastCloudError?.let { sheet.text("Dernière erreur Google : ${googleErrorLabel(Exception(it))}", "#D93025", 13f) }
+        Voice.lastCloudError?.let {
+            if (eleven) sheet.text("Dernière erreur ElevenLabs : $it", "#D93025", 13f)
+            else if (google) sheet.text("Dernière erreur Google : ${googleErrorLabel(Exception(it))}", "#D93025", 13f)
+        }
         sheet.sectionTitle("Réglage")
         val rates = listOf(0.85f to "Lente", 1f to "Normale", 1.15f to "Rapide", 1.3f to "Très rapide")
         sheet.item("⏩", "Vitesse", rates.minByOrNull { Math.abs(it.first - settings.ttsRate) }?.second, "#F1F3F4") {
@@ -2353,6 +2369,62 @@ class MainActivity : Activity(), Nav.Listener {
         sheet.show()
     }
 
+    private fun showElevenVoices() {
+        toast("Chargement des voix ElevenLabs…")
+        val key = settings.elevenKey
+        io.execute {
+            val mine = try { Result.success(Voice.elevenAccountVoices(key)) } catch (e: Exception) { Result.failure(e) }
+            val library = if (mine.isSuccess) try { Voice.elevenFrenchVoices(key) } catch (e: Exception) { emptyList() } else emptyList()
+            main.post {
+                val voices = mine.getOrNull()
+                if (voices == null) {
+                    val err = mine.exceptionOrNull() as? Exception ?: Exception("erreur")
+                    Sheet(this).title("Voix ElevenLabs indisponibles", Voice.elevenErrorLabel(err))
+                        .text("Créez une clé sur elevenlabs.io › Developers › API Keys (droit « Text to Speech » et « Voices » en lecture), puis collez-la dans ☰ › Réglages › Services connectés. L'offre gratuite donne 10 000 caractères par mois, et l'appli garde les annonces en cache.")
+                        .secondary("Fermer") {}
+                        .show()
+                    return@post
+                }
+                val sheet = Sheet(this).title("🎙️  Voix ElevenLabs", "Toucher une voix pour l'écouter et la choisir")
+                fun pick(v: Voice.ElevenVoice, id: String) {
+                    settings.elevenVoice = id
+                    settings.elevenVoiceName = v.name
+                    settings.voiceSource = "eleven"
+                    Voice.preview()
+                    showElevenVoices()
+                }
+                fun row(v: Voice.ElevenVoice) {
+                    val selected = settings.voiceSource == "eleven" && v.id == settings.elevenVoice
+                    val icon = when (v.gender) { "male" -> "👨"; "female" -> "👩"; else -> "🗣️" }
+                    sheet.item(icon, v.name, listOfNotNull(if (selected) "✓ Choix actuel" else null, v.details.ifBlank { null }).joinToString(" · ").ifBlank { null },
+                        if (selected) "#D2E3FC" else "#F1F3F4") {
+                        if (!v.shared) { pick(v, v.id); return@item }
+                        toast("Ajout de ${v.name} à votre compte…")
+                        io.execute {
+                            val added = try { Result.success(Voice.elevenAddShared(key, v)) } catch (e: Exception) { Result.failure(e) }
+                            main.post {
+                                val id = added.getOrNull()
+                                if (id != null) pick(v, id)
+                                else Sheet(this).title("Voix non ajoutée", Voice.elevenErrorLabel(added.exceptionOrNull() as? Exception ?: Exception("erreur")))
+                                    .secondary("Fermer") {}.show()
+                            }
+                        }
+                    }
+                }
+                sheet.sectionTitle("Vos voix (${voices.size})")
+                if (voices.isEmpty()) sheet.text("Aucune voix sur ce compte.", "#5F6368")
+                voices.forEach { row(it) }
+                val extra = library.filter { l -> voices.none { it.id == l.id } }
+                if (extra.isNotEmpty()) {
+                    sheet.sectionTitle("Voix françaises natives (bibliothèque)")
+                    sheet.text("Ajoutées à votre compte au premier choix. Sur l'offre gratuite, ElevenLabs peut demander un abonnement pour certaines.", "#5F6368", 13f)
+                    extra.forEach { row(it) }
+                }
+                sheet.show()
+            }
+        }
+    }
+
     private fun showGoogleVoices() {
         toast("Chargement des voix Google…")
         val key = settings.googleKey
@@ -2391,7 +2463,8 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "🔍 Carte plus rapprochée pendant le guidage, zoom sur la voiture à l'approche des intersections, et la route reste visible sous les bandeaux de sortie, de voies et de radar. Réglable dans Affichage de la carte › Zoom pendant le guidage.\n" +
+                "🎙️ Voix ElevenLabs pour le guidage : collez votre clé dans Réglages › Services connectés, puis choisissez une voix française dans Voix et annonces. Si ElevenLabs ne répond pas, la voix du téléphone prend le relais.\n" +
+                    "🔍 Carte plus rapprochée pendant le guidage, zoom sur la voiture à l'approche des intersections, et la route reste visible sous les bandeaux de sortie, de voies et de radar. Réglable dans Affichage de la carte › Zoom pendant le guidage.\n" +
                     "⚠️ Zones de danger : grand bandeau avec le bouton « Leurre ? Ne plus annoncer » (il n'apparaissait jamais).\n" +
                     "🔄 Rond-points : le schéma suit le vrai angle de la sortie à prendre (tout droit, à gauche, demi-tour…).\n" +
                     "🔆 L'écran reste allumé tant que l'appli est ouverte.\n" +
@@ -2464,6 +2537,7 @@ class MainActivity : Activity(), Nav.Listener {
                 if (settings.hasTomTom) "Trafic TomTom ✓" else "Trafic TomTom ✗",
                 if (settings.hasHere) "HERE ✓" else "HERE ✗",
                 if (settings.hasGoogle) "Avis Google ✓" else "Avis Google ✗",
+                if (settings.hasEleven) "ElevenLabs ✓" else "ElevenLabs ✗",
             ).joinToString(" · "), "#F1F3F4") { showKeySettings() }
             .show()
     }
@@ -2618,10 +2692,14 @@ class MainActivity : Activity(), Nav.Listener {
         sheet.sectionTitle("Notes et avis Google (facultatif)")
         sheet.text("Sans clé, le bouton « Voir les avis sur Google Maps » reste disponible sur chaque restaurant.", "#5F6368", 13f)
         val google = sheet.input("Clé API Google Places", settings.googleKey)
+        sheet.sectionTitle("Voix ElevenLabs (elevenlabs.io)")
+        sheet.text("Voix très naturelles pour le guidage. Offre gratuite : 10 000 caractères par mois, les annonces déjà dites sont gardées en cache.", "#5F6368", 13f)
+        val eleven = sheet.input("Clé API ElevenLabs", settings.elevenKey)
         sheet.primary("Enregistrer") {
             settings.tomtomKey = tomtom.text.toString()
             settings.hereKey = here.text.toString()
             settings.googleKey = google.text.toString()
+            settings.elevenKey = eleven.text.toString()
             updateTrafficLayer()
             Nav.refreshTrafficNow()
             toast("Clés enregistrées")

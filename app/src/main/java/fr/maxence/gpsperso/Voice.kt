@@ -18,8 +18,10 @@ import java.util.Locale
 import java.util.concurrent.Executors
 
 /**
- * Voix de l'appli : synthèse du téléphone (n'importe quel moteur installé) ou voix naturelles
- * Google Cloud Text-to-Speech (avec la clé Google, mises en cache). Gère aussi la sourdine.
+ * Voix de l'appli : synthèse du téléphone (n'importe quel moteur installé), voix naturelles
+ * Google Cloud Text-to-Speech (clé Google) ou voix ElevenLabs (clé ElevenLabs), ces deux dernières
+ * mises en cache. Si la voix en ligne échoue ou tarde, la voix du téléphone prend le relais.
+ * Gère aussi la sourdine.
  */
 object Voice : TextToSpeech.OnInitListener {
 
@@ -41,6 +43,13 @@ object Voice : TextToSpeech.OnInitListener {
                 return "${name.substringAfterLast('-')} · $family${if (g.isNotEmpty()) " · $g" else ""}"
             }
     }
+
+    /** Voix ElevenLabs : [shared] = voix de la bibliothèque publique, à ajouter au compte avant usage. */
+    class ElevenVoice(val id: String, val name: String, val details: String, val gender: String, val shared: Boolean, val ownerId: String = "")
+
+    private const val ELEVEN = "https://api.elevenlabs.io/v1"
+    /** Modèle le plus naturel en français ; le cache évite de payer deux fois la même phrase. */
+    private const val ELEVEN_MODEL = "eleven_multilingual_v2"
 
     private lateinit var app: Context
     private lateinit var settings: Settings
@@ -121,8 +130,15 @@ object Voice : TextToSpeech.OnInitListener {
     fun preview(text: String = "Dans 300 mètres, tournez à droite. Radar fixe dans 500 mètres, limité à 80.") = speak(text)
 
     private fun speak(text: String) {
-        if (settings.voiceSource == "google" && settings.hasGoogle) cloudSay(text) else deviceSay(text)
+        when {
+            settings.voiceSource == "eleven" && settings.hasEleven && settings.elevenVoice.isNotBlank() -> cloudSay(text)
+            settings.voiceSource == "google" && settings.hasGoogle -> cloudSay(text)
+            else -> deviceSay(text)
+        }
     }
+
+    /** Nom du service de voix en ligne utilisé (pour les messages d'erreur). */
+    fun cloudName(): String = if (settings.voiceSource == "eleven") "ElevenLabs" else "Google"
 
     private fun deviceSay(text: String) {
         if (!ready) return
@@ -170,14 +186,15 @@ object Voice : TextToSpeech.OnInitListener {
     }
 
     private fun cloudSay(text: String) {
-        val key = settings.googleKey
-        val voice = settings.googleVoice
+        val eleven = settings.voiceSource == "eleven"
+        val key = if (eleven) settings.elevenKey else settings.googleKey
+        val voice = if (eleven) settings.elevenVoice else settings.googleVoice
         val rate = settings.ttsRate
         val pitch = settings.ttsPitch
         requestFocus()
         cloudIo.execute {
             try {
-                val file = cloudFile(key, voice, rate, pitch, text)
+                val file = if (eleven) elevenFile(key, voice, rate, text) else cloudFile(key, voice, rate, pitch, text)
                 main.post {
                     lastCloudError = null
                     queue.add(file)
@@ -185,12 +202,12 @@ object Voice : TextToSpeech.OnInitListener {
                 }
             } catch (e: Exception) {
                 main.post {
-                    lastCloudError = e.message
+                    lastCloudError = if (eleven) elevenErrorLabel(e) else e.message
                     deviceSay(text)
                     val now = System.currentTimeMillis()
                     if (now - lastErrorShownAt > 60_000) {
                         lastErrorShownAt = now
-                        onCloudError?.invoke(e.message ?: "erreur inconnue")
+                        onCloudError?.invoke(lastCloudError ?: "erreur inconnue")
                     }
                 }
             }
@@ -228,8 +245,144 @@ object Voice : TextToSpeech.OnInitListener {
         return file
     }
 
-    /** Test pas à pas de la voix Google, résultat lisible pour l'utilisateur. */
+    // ---------- Voix ElevenLabs ----------
+
+    /** Voix du compte ElevenLabs (voix prêtes à l'emploi et voix ajoutées). */
+    fun elevenAccountVoices(key: String): List<ElevenVoice> {
+        val json = JSONObject(Net.request("$ELEVEN/voices", headers = mapOf("xi-api-key" to key), timeoutMs = 15_000))
+        val arr = json.optJSONArray("voices") ?: return emptyList()
+        return (0 until arr.length()).map { arr.getJSONObject(it) }.map { v ->
+            val labels = v.optJSONObject("labels")
+            val lang = labels?.optString("language").orEmpty()
+            val details = listOf(lang.uppercase(), labels?.optString("accent").orEmpty(), labels?.optString("descriptive").orEmpty())
+                .filter { it.isNotBlank() }.joinToString(" · ")
+            ElevenVoice(v.getString("voice_id"), v.optString("name").substringBefore(" - ").trim(), details,
+                labels?.optString("gender").orEmpty(), shared = false)
+        }.sortedWith(compareBy({ !it.details.startsWith("FR") }, { it.name }))
+    }
+
+    /** Voix françaises natives de la bibliothèque publique ElevenLabs. */
+    fun elevenFrenchVoices(key: String): List<ElevenVoice> {
+        val json = JSONObject(Net.request("$ELEVEN/shared-voices?language=fr&page_size=40&sort=usage_character_count_1y",
+            headers = mapOf("xi-api-key" to key), timeoutMs = 15_000))
+        val arr = json.optJSONArray("voices") ?: return emptyList()
+        return (0 until arr.length()).map { arr.getJSONObject(it) }.map { v ->
+            val details = listOf(v.optString("accent"), v.optString("age"), v.optString("descriptive"))
+                .filter { it.isNotBlank() && it != "null" }.joinToString(" · ").replace('_', ' ')
+            ElevenVoice(v.getString("voice_id"), v.optString("name").substringBefore(" - ").substringBefore(" | ").trim(), details,
+                v.optString("gender"), shared = true, ownerId = v.optString("public_owner_id"))
+        }.distinctBy { it.id }
+    }
+
+    /** Ajoute une voix de la bibliothèque au compte (obligatoire pour la faire parler). Renvoie son identifiant. */
+    fun elevenAddShared(key: String, v: ElevenVoice): String {
+        val body = JSONObject().put("new_name", v.name).toString()
+        return try {
+            JSONObject(Net.request("$ELEVEN/voices/add/${v.ownerId}/${v.id}", body, headers = mapOf("xi-api-key" to key)))
+                .optString("voice_id").ifBlank { v.id }
+        } catch (e: Exception) {
+            // Déjà ajoutée au compte : on peut l'utiliser telle quelle
+            if ("already" in (e.message ?: "")) v.id else throw e
+        }
+    }
+
+    /** MP3 synthétisé par ElevenLabs, gardé en cache comme pour Google. */
+    private fun elevenFile(key: String, voice: String, rate: Float, text: String): File {
+        val speed = rate.coerceIn(0.7f, 1.2f)
+        val file = cacheFile("eleven|$ELEVEN_MODEL|$voice|$speed|$text")
+        if (file.exists()) {
+            file.setLastModified(System.currentTimeMillis())
+            return file
+        }
+        val body = JSONObject()
+            .put("text", text)
+            .put("model_id", ELEVEN_MODEL)
+            .put("voice_settings", JSONObject()
+                .put("stability", 0.6)
+                .put("similarity_boost", 0.8)
+                .put("speed", speed.toDouble()))
+        // Une consigne qui arrive trop tard ne sert à rien : au-delà de 6 s, voix du téléphone
+        val audio = Net.requestBytes(
+            "$ELEVEN/text-to-speech/$voice?output_format=mp3_44100_128", body.toString(),
+            headers = mapOf("xi-api-key" to key, "Accept" to "audio/mpeg"), timeoutMs = 6_000,
+        )
+        if (audio.size < 200) throw IllegalStateException("réponse audio vide d'ElevenLabs")
+        file.writeBytes(audio)
+        trimCache()
+        return file
+    }
+
+    /** Message d'erreur ElevenLabs compréhensible. */
+    fun elevenErrorLabel(e: Exception): String {
+        val m = e.message ?: return "erreur inconnue"
+        return when {
+            "quota_exceeded" in m -> "crédits ElevenLabs du mois épuisés (ils reviennent à la date de renouvellement)"
+            "paid_plan_required" in m || "payment_required" in m || "HTTP 402" in m -> "cette voix demande un abonnement ElevenLabs payant : choisissez une voix de « Vos voix »"
+            "voice_not_found" in m || "HTTP 404" in m -> "voix introuvable sur votre compte : choisissez-en une autre"
+            "missing_permissions" in m -> "la clé n'a pas le droit « Text to Speech » : modifiez ses autorisations sur elevenlabs.io"
+            "invalid_api_key" in m || "HTTP 401" in m -> "clé ElevenLabs refusée (vérifiez qu'elle est bien copiée)"
+            "detected_unusual_activity" in m -> "ElevenLabs a bloqué l'offre gratuite pour ce réseau (VPN ?)"
+            "voice_limit_reached" in m -> "nombre maximal de voix atteint sur le compte : supprimez-en une sur elevenlabs.io"
+            "HTTP 429" in m -> "trop de demandes à la fois, réessayez"
+            e is java.net.SocketTimeoutException || "timed out" in m || "timeout" in m.lowercase() -> "ElevenLabs a mis trop de temps à répondre"
+            e is java.net.UnknownHostException -> "pas d'Internet"
+            else -> m.take(140)
+        }
+    }
+
+    private fun cacheFile(id: String): File {
+        val dir = File(app.cacheDir, "voix").apply { mkdirs() }
+        val hash = MessageDigest.getInstance("SHA-1").digest(id.toByteArray()).joinToString("") { "%02x".format(it) }
+        return File(dir, "$hash.mp3")
+    }
+
+    /** On garde les 400 annonces les plus récentes. */
+    private fun trimCache() {
+        File(app.cacheDir, "voix").listFiles()?.sortedByDescending { it.lastModified() }?.drop(400)?.forEach { it.delete() }
+    }
+
+    /** Test pas à pas de la voix ElevenLabs, résultat lisible pour l'utilisateur. */
+    private fun diagnoseEleven(done: (String) -> Unit) {
+        val key = settings.elevenKey
+        val voice = settings.elevenVoice
+        val rate = settings.ttsRate
+        val lines = ArrayList<String>()
+        lines += if (settings.voiceSource == "eleven") "✅ Voix ElevenLabs sélectionnée" else "❌ ElevenLabs n'est pas sélectionnée : choisissez une voix dans « Voix ElevenLabs »"
+        lines += if (key.isNotBlank()) "✅ Clé ElevenLabs présente" else "❌ Clé ElevenLabs absente"
+        lines += if (voice.isNotBlank()) "✅ Voix choisie : ${settings.elevenVoiceName}" else "❌ Aucune voix choisie"
+        cloudIo.execute {
+            var file: File? = null
+            try {
+                val voices = elevenAccountVoices(key)
+                lines += "✅ Compte joint : ${voices.size} voix disponibles"
+                if (voice.isNotBlank() && voices.none { it.id == voice }) lines += "⚠️ La voix choisie n'est pas (ou plus) sur votre compte"
+            } catch (e: Exception) {
+                lines += "❌ Compte : ${elevenErrorLabel(e)}"
+            }
+            try {
+                val text = "Test de la voix ElevenLabs. Radar fixe dans 500 mètres."
+                cacheFile("eleven|$ELEVEN_MODEL|$voice|${rate.coerceIn(0.7f, 1.2f)}|$text").delete()
+                file = elevenFile(key, voice, rate, text)
+                lines += "✅ Synthèse : ${file.length() / 1024} Ko reçus"
+            } catch (e: Exception) {
+                lines += "❌ Synthèse : ${elevenErrorLabel(e)}"
+            }
+            main.post {
+                val f = file
+                if (f != null) {
+                    requestFocus()
+                    queue.add(f)
+                    if (player == null) playNext()
+                    lines += "🔊 Lecture lancée : vous devez entendre la voix ElevenLabs maintenant"
+                }
+                done(lines.joinToString("\n"))
+            }
+        }
+    }
+
+    /** Test pas à pas de la voix en ligne choisie, résultat lisible pour l'utilisateur. */
     fun diagnose(done: (String) -> Unit) {
+        if (settings.voiceSource == "eleven") return diagnoseEleven(done)
         val key = settings.googleKey
         val voice = settings.googleVoice
         val rate = settings.ttsRate

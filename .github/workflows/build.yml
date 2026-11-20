@@ -34,6 +34,7 @@ jobs:
         env:
           LUFOP_KEY: ${{ secrets.LUFOP_KEY }}
           GOOGLE_KEY: ${{ secrets.GOOGLE_KEY }}
+          ELEVENLABS_KEY: ${{ secrets.ELEVENLABS_KEY }}
         run: ./gradlew assembleRelease --stacktrace
       - name: Renommer l'APK
         run: cp app/build/outputs/apk/release/app-release.apk gps-perso.apk

@@ -89,7 +89,7 @@ class Settings(context: Context) {
         get() = prefs.getString("voice_mode", "all") ?: "all"
         set(v) = prefs.edit().putString("voice_mode", v).apply()
 
-    /** "device" : voix du téléphone ; "google" : voix Google Cloud (clé Google). */
+    /** "device" : voix du téléphone ; "google" : voix Google Cloud (clé Google) ; "eleven" : voix ElevenLabs (clé ElevenLabs). */
     var voiceSource: String
         get() = prefs.getString("voice_source", "device") ?: "device"
         set(v) = prefs.edit().putString("voice_source", v).apply()
@@ -105,6 +105,20 @@ class Settings(context: Context) {
     var googleVoice: String
         get() = prefs.getString("google_voice", "fr-FR-Neural2-A") ?: "fr-FR-Neural2-A"
         set(v) = prefs.edit().putString("google_voice", v).apply()
+
+    /** Clé ElevenLabs : celle saisie dans Réglages, sinon le secret GitHub ELEVENLABS_KEY. */
+    var elevenKey: String
+        get() = prefs.getString("eleven_key", null)?.takeIf { it.isNotBlank() } ?: BuildConfig.ELEVENLABS_KEY
+        set(v) = prefs.edit().putString("eleven_key", v.trim()).apply()
+
+    /** Voix ElevenLabs choisie (identifiant + nom affiché). Par défaut « Alice », voix française claire. */
+    var elevenVoice: String
+        get() = prefs.getString("eleven_voice", "ZtJvTSnGgAdhWKQBViA1") ?: "ZtJvTSnGgAdhWKQBViA1"
+        set(v) = prefs.edit().putString("eleven_voice", v).apply()
+
+    var elevenVoiceName: String
+        get() = prefs.getString("eleven_voice_name", "Alice") ?: "Alice"
+        set(v) = prefs.edit().putString("eleven_voice_name", v).apply()
 
     var ttsRate: Float
         get() = prefs.getFloat("tts_rate", 1f)
@@ -164,6 +178,7 @@ class Settings(context: Context) {
     val hasHome: Boolean get() = !homeLat.isNaN() && !homeLon.isNaN()
     val hasLufop: Boolean get() = lufopKey.isNotBlank()
     val hasGoogle: Boolean get() = googleKey.isNotBlank()
+    val hasEleven: Boolean get() = elevenKey.isNotBlank()
 
     val hasTomTom: Boolean get() = tomtomKey.isNotBlank()
 }
