@@ -18,6 +18,7 @@ android {
         // Clé Lufop injectée depuis le secret GitHub LUFOP_KEY (jamais écrite dans le code)
         buildConfigField("String", "LUFOP_KEY", "\"${System.getenv("LUFOP_KEY") ?: ""}\"")
         buildConfigField("String", "GOOGLE_KEY", "\"${System.getenv("GOOGLE_KEY") ?: ""}\"")
+        buildConfigField("String", "ELEVENLABS_KEY", "\"${System.getenv("ELEVENLABS_KEY") ?: ""}\"")
     }
 
     buildFeatures {

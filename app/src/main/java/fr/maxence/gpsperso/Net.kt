@@ -88,6 +88,34 @@ object Net {
         }
     }
 
+    /** Comme [request], mais renvoie les octets bruts (audio). */
+    fun requestBytes(
+        url: String,
+        body: String,
+        headers: Map<String, String> = emptyMap(),
+        timeoutMs: Int = 20_000,
+    ): ByteArray {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        try {
+            conn.connectTimeout = minOf(10_000, timeoutMs)
+            conn.readTimeout = timeoutMs
+            conn.setRequestProperty("User-Agent", USER_AGENT)
+            headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
+            conn.requestMethod = "POST"
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                val text = conn.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+                throw IOException("HTTP $code : ${text.take(200)}")
+            }
+            return conn.inputStream.use { it.readBytes() }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     /**
      * Requête OpenStreetMap Overpass. Une seule à la fois (les serveurs refusent les rafales),
      * avec bascule sur un autre serveur en cas d'erreur.
