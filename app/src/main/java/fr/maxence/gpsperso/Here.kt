@@ -39,6 +39,9 @@ object Here {
                 detail = null,
                 source = "here",
                 description = listOfNotNull(label, description).joinToString("\n"),
+                heading = link?.optJSONArray("points")?.let { pts ->
+                    Geo.lineHeading((0 until pts.length()).mapNotNull { k -> pts.optJSONObject(k)?.let { q -> doubleArrayOf(q.optDouble("lat"), q.optDouble("lng")) } })
+                },
             )
         }
         return list

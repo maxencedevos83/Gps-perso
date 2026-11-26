@@ -317,6 +317,7 @@ class MainActivity : Activity(), Nav.Listener {
             restoreNavigationUi()
             onAltitude(Nav.altitude)
             onSpeedLimit(Nav.speedLimit)
+            onCity(Nav.city)
         }
     }
 
@@ -1103,6 +1104,14 @@ class MainActivity : Activity(), Nav.Listener {
         }
     }
 
+    override fun onCity(name: String?) {
+        val v = findViewById<TextView>(R.id.cityBanner)
+        if (name == null) v.visibility = View.GONE else {
+            v.text = "📍 $name"
+            v.visibility = View.VISIBLE
+        }
+    }
+
     override fun onSpeedLimit(limit: Int?) {
         val v = findViewById<TextView>(R.id.speedLimit)
         if (limit == null) v.visibility = View.GONE else {
@@ -1561,14 +1570,14 @@ class MainActivity : Activity(), Nav.Listener {
 
     private fun showReportDialog() {
         val loc = lastLocation ?: run { toast("Position GPS pas encore disponible"); return }
-        showReportDialogAt(loc.latitude, loc.longitude)
+        showReportDialogAt(loc.latitude, loc.longitude, Nav.movingHeading(loc))
     }
 
-    private fun showReportDialogAt(lat: Double, lon: Double) {
+    private fun showReportDialogAt(lat: Double, lon: Double, heading: Double? = null) {
         val sheet = Sheet(this).title("Que voulez-vous signaler ?")
         AlertType.reportable.forEach { type ->
             sheet.item(alertIcon(type), type.label, color = pale(type.color)) {
-                val alert = alertStore.add(type, lat, lon)
+                val alert = alertStore.add(type, lat, lon, heading)
                 Nav.markSpoken(alert.id) // pas d'annonce pour sa propre alerte
                 Nav.alertsChanged()
                 toast("${alert.type.label} signalé")
@@ -2463,7 +2472,9 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "🎙️ Voix ElevenLabs pour le guidage : collez votre clé dans Réglages › Services connectés, puis choisissez une voix française dans Voix et annonces. Si ElevenLabs ne répond pas, la voix du téléphone prend le relais.\n" +
+                "🏙️ Petit bandeau en haut de l'écran avec la ville où tu te trouves (téléphone et Android Auto).\n" +
+                    "↔️ Radars et bouchons signalés seulement dans ton sens de circulation, et plus pour ceux de la voie d'en face.\n" +
+                    "🎙️ Voix ElevenLabs pour le guidage : collez votre clé dans Réglages › Services connectés, puis choisissez une voix française dans Voix et annonces. Si ElevenLabs ne répond pas, la voix du téléphone prend le relais.\n" +
                     "🔍 Carte plus rapprochée pendant le guidage, zoom sur la voiture à l'approche des intersections, et la route reste visible sous les bandeaux de sortie, de voies et de radar. Réglable dans Affichage de la carte › Zoom pendant le guidage.\n" +
                     "⚠️ Zones de danger : grand bandeau avec le bouton « Leurre ? Ne plus annoncer » (il n'apparaissait jamais).\n" +
                     "🔄 Rond-points : le schéma suit le vrai angle de la sortie à prendre (tout droit, à gauche, demi-tour…).\n" +

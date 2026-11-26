@@ -33,7 +33,10 @@ enum class AlertType(
     }
 }
 
-/** source : "moi" (signalement perso), "osm", "lufop" ou "tomtom". */
+/**
+ * source : "moi" (signalement perso), "osm", "lufop" ou "tomtom".
+ * heading : sens de circulation concerné (cap en degrés), si la source le donne ; null = inconnu.
+ */
 data class Alert(
     val id: String,
     val type: AlertType,
@@ -43,12 +46,14 @@ data class Alert(
     val detail: String? = null,
     val source: String = "moi",
     val description: String? = null,
+    val heading: Double? = null,
 ) {
     val title: String get() = if (detail != null) "${type.label} $detail" else type.label
 
     fun toJson(): JSONObject = JSONObject()
         .put("id", id).put("type", type.name).put("lat", lat).put("lon", lon).put("ts", createdAt)
         .put("detail", detail ?: "").put("source", source).put("description", description ?: "")
+        .also { o -> heading?.let { o.put("hdg", it) } }
 
     companion object {
         fun fromJson(o: JSONObject): Alert? {
@@ -62,6 +67,7 @@ data class Alert(
                 detail = o.optString("detail").ifBlank { null },
                 source = o.optString("source", "moi"),
                 description = o.optString("description").ifBlank { null },
+                heading = if (o.has("hdg")) o.optDouble("hdg").takeIf { !it.isNaN() } else null,
             )
         }
     }
@@ -85,8 +91,9 @@ class AlertStore(context: Context) {
         return list
     }
 
-    fun add(type: AlertType, lat: Double, lon: Double): Alert {
-        val alert = Alert(UUID.randomUUID().toString(), type, lat, lon, System.currentTimeMillis())
+    /** heading : cap du conducteur au moment du signalement (l'alerte vaut pour ce sens). */
+    fun add(type: AlertType, lat: Double, lon: Double, heading: Double? = null): Alert {
+        val alert = Alert(UUID.randomUUID().toString(), type, lat, lon, System.currentTimeMillis(), heading = heading)
         save(all() + alert)
         return alert
     }

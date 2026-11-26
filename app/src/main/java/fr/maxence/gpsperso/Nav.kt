@@ -24,6 +24,10 @@ object Nav : LocationListener {
     private const val OFF_ROUTE_METERS = 50.0
     private const val ALERT_AHEAD_METERS = 800.0
     private const val FREE_DRIVE_ALERT_METERS = 500.0
+    /** Au-delà de cet écart à gauche de la route, une alerte sans sens connu est pour la voie d'en face. */
+    private const val OTHER_SIDE_METERS = 12.0
+    /** Écart de cap maximal entre la route et le sens d'une alerte. */
+    private const val DIRECTION_TOLERANCE = 75.0
     private const val INCIDENTS_REFRESH_MS = 15 * 60_000L
     private const val ETA_REFRESH_MS = 10 * 60_000L
 
@@ -54,6 +58,7 @@ object Nav : LocationListener {
         fun onMessage(text: String) {}
         fun onSpeedLimit(limit: Int?) {}
         fun onAltitude(meters: Int?) {}
+        fun onCity(name: String?) {}
         fun onWeather(warnings: List<Weather.Warning>) {}
         fun onParkingChanged() {}
         fun onRouteOptions(options: List<Route>) {}
@@ -85,6 +90,11 @@ object Nav : LocationListener {
     private var altitudeAt: Location? = null
     private var altitudeTime = 0L
     private var altitudeLoading = false
+    /** Ville (commune) où l'on se trouve. */
+    var city: String? = null; private set
+    private var cityAt: Location? = null
+    private var cityTime = 0L
+    private var cityLoading = false
     var destination: Place? = null; private set
     /** Étape facultative (station, resto) avant la destination. */
     var stop: Place? = null; private set
@@ -244,6 +254,7 @@ object Nav : LocationListener {
         try { emit { it.onLocation(location, first) } } catch (e: Exception) { Bg.record("Erreur évitée (carte)", e) }
         try {
             maybeUpdateAltitude(location)
+            maybeUpdateCity(location)
             if (navigating) updateNavigation(location) else checkFreeDriveAlerts(location)
             maybeLoadOsmAround(location)
             if (first) periodicRefresh()
@@ -546,11 +557,28 @@ object Nav : LocationListener {
             .filter { Math.abs(it.lat - loc.latitude) < dLat && Math.abs(it.lon - loc.longitude) < dLat * 1.6 }
             .map { it to Geo.distance(loc.latitude, loc.longitude, it.lat, it.lon) }
             .filter { (a, d) ->
-                d < FREE_DRIVE_ALERT_METERS && wantedNow(a, loc) && (!loc.hasBearing() ||
-                    Geo.angleDiff(loc.bearing.toDouble(), Geo.bearing(loc.latitude, loc.longitude, a.lat, a.lon)) < 50)
+                d < FREE_DRIVE_ALERT_METERS && wantedNow(a, loc) && (!loc.hasBearing() || run {
+                    val heading = loc.bearing.toDouble()
+                    val toAlert = Geo.bearing(loc.latitude, loc.longitude, a.lat, a.lon)
+                    // Écart latéral par rapport à la ligne de marche (positif à droite)
+                    val side = d * Math.sin(Math.toRadians(toAlert - heading))
+                    Geo.angleDiff(heading, toAlert) < 50 && inMyDirection(a, heading, side, d)
+                })
             }
             .minByOrNull { it.second }
         showAlert(candidate?.first, candidate?.second)
+    }
+
+    /**
+     * L'alerte concerne-t-elle notre sens de circulation ? Si la source donne le sens (bouchons
+     * TomTom/HERE/Bison Futé), on compare les caps. Sinon (radars), on regarde de quel côté de
+     * la route est le point : sur une route à chaussées séparées, celui de l'autre sens est
+     * à plus de ~12 m sur la gauche. distance sert à tolérer l'imprécision du cap hors trajet.
+     */
+    private fun inMyDirection(a: Alert, roadBearing: Double, side: Double, distance: Double): Boolean {
+        a.heading?.let { return Geo.angleDiff(it, roadBearing) <= DIRECTION_TOLERANCE }
+        if (a.source == "moi") return true
+        return side >= -(OTHER_SIDE_METERS + distance * 0.03)
     }
 
     private fun showAlert(alert: Alert?, distance: Double?) {
@@ -581,6 +609,10 @@ object Nav : LocationListener {
             say("$what$length dans ${Geo.spokenDistance(distance.coerceAtLeast(50.0))}$limit", Voice.Kind.ALERT)
         }
     }
+
+    /** Cap du véhicule s'il roule (sinon null), pour donner un sens aux signalements. */
+    fun movingHeading(loc: Location?): Double? =
+        if (loc != null && loc.hasBearing() && loc.hasSpeed() && loc.speed > 3) loc.bearing.toDouble() else null
 
     /** Pas d'annonce pour un signalement que l'on vient de faire soi-même. */
     fun markSpoken(alertId: String) { spoken.add("a-$alertId") }
@@ -684,7 +716,9 @@ object Nav : LocationListener {
         val r = route ?: run { routeAlerts = emptyList(); return }
         io.execute {
             val alerts = allAlerts().filter { isAnnounced(it) }
-            val placed = alerts.mapNotNull { a -> r.projectNear(a.lat, a.lon, 40.0)?.let { a to it.along } }
+            val placed = alerts.mapNotNull { a ->
+                r.projectNear(a.lat, a.lon, 40.0) { seg, side -> inMyDirection(a, r.bearingAt(seg), side, 0.0) }?.let { a to it.along }
+            }
             main.post { if (route === r) routeAlerts = placed }
         }
     }
@@ -915,6 +949,53 @@ object Nav : LocationListener {
                 }
             }
         }
+    }
+
+    // ---------- Ville ----------
+
+    /**
+     * Commune actuelle : géocodeur Android (sans clé), repli Photon (OpenStreetMap).
+     * Rafraîchie tous les 400 m, ou dès 150 m si 30 s ont passé (entrée de ville plus vite vue).
+     */
+    private fun maybeUpdateCity(loc: Location) {
+        if (cityLoading) return
+        val prev = cityAt
+        val now = System.currentTimeMillis()
+        if (prev != null) {
+            val moved = prev.distanceTo(loc)
+            if (moved < 150 || (moved < 400 && now - cityTime < 30_000)) return
+        }
+        cityLoading = true
+        cityAt = loc
+        cityTime = now
+        io.execute {
+            val name = try { cityFromGeocoder(loc.latitude, loc.longitude) } catch (e: Exception) { null }
+                ?: try { cityFromPhoton(loc.latitude, loc.longitude) } catch (e: Exception) { null }
+            main.post {
+                cityLoading = false
+                if (name == null) { cityAt = null; return@post }
+                if (name != city) {
+                    city = name
+                    emit { it.onCity(name) }
+                }
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun cityFromGeocoder(lat: Double, lon: Double): String? {
+        if (!android.location.Geocoder.isPresent()) return null
+        val list = android.location.Geocoder(app, java.util.Locale.FRANCE).getFromLocation(lat, lon, 1)
+        val a = list?.firstOrNull() ?: return null
+        return (a.locality ?: a.subLocality)?.trim()?.ifBlank { null }
+    }
+
+    private fun cityFromPhoton(lat: Double, lon: Double): String? {
+        val url = String.format(java.util.Locale.US, "https://photon.komoot.io/reverse?lat=%.5f&lon=%.5f&lang=fr&limit=1", lat, lon)
+        val props = org.json.JSONObject(Net.request(url, timeoutMs = 8000)).optJSONArray("features")
+            ?.optJSONObject(0)?.optJSONObject("properties") ?: return null
+        return listOf("city", "town", "village", "municipality", "county")
+            .firstNotNullOfOrNull { props.optString(it).trim().ifBlank { null } }
     }
 
     // ---------- Voix ----------
