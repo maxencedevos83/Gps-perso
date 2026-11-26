@@ -1425,7 +1425,7 @@ class MainActivity : Activity(), Nav.Listener {
             redLight = alert.type == AlertType.RADAR_FEU
             danger = dangerZone
             // Vue de l'échangeur déjà affichée : bandeau radar compact pour laisser voir la route
-            visibility = if (findViewById<View>(R.id.junctionView).visibility == View.VISIBLE) View.GONE else View.VISIBLE
+            visibility = if (this@MainActivity.findViewById<View>(R.id.junctionView).visibility == View.VISIBLE) View.GONE else View.VISIBLE
         }
         findViewById<TextView>(R.id.radarDistance).text = Geo.formatDistance(distance.coerceAtLeast(0.0))
         val what = when {
