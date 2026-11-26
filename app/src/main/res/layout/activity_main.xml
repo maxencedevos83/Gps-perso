@@ -18,6 +18,26 @@
         android:orientation="vertical"
         android:padding="12dp">
 
+        <!-- Petit bandeau : ville où l'on se trouve -->
+        <TextView
+            android:id="@+id/cityBanner"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginBottom="6dp"
+            android:background="@drawable/bg_card"
+            android:elevation="4dp"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:paddingStart="14dp"
+            android:paddingTop="4dp"
+            android:paddingEnd="14dp"
+            android:paddingBottom="4dp"
+            android:textColor="#202124"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+
         <LinearLayout
             android:id="@+id/searchBar"
             android:layout_width="match_parent"

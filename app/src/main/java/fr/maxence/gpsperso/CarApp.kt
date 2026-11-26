@@ -493,7 +493,7 @@ class ReportScreen(carContext: CarContext) : Screen(carContext) {
             list.addItem(Row.Builder().setTitle(type.label).setOnClickListener {
                 val loc = Nav.lastLocation
                 if (loc != null) {
-                    val alert = Nav.alertStore.add(type, loc.latitude, loc.longitude)
+                    val alert = Nav.alertStore.add(type, loc.latitude, loc.longitude, Nav.movingHeading(loc))
                     Nav.markSpoken(alert.id)
                     Nav.alertsChanged()
                     CarToast.makeText(carContext, "${type.label} signalé", CarToast.LENGTH_SHORT).show()

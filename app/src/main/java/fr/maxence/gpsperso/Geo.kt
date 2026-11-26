@@ -105,6 +105,30 @@ object Geo {
         return t to hypot(ax + t * dx, ay + t * dy)
     }
 
+    /**
+     * Écart latéral signé (m) du point par rapport à la droite a→b : positif à droite
+     * du sens de marche, négatif à gauche.
+     */
+    fun sideOffset(lat: Double, lon: Double, a: DoubleArray, b: DoubleArray): Double {
+        val k = cos(Math.toRadians(lat)) * METERS_PER_DEG_LAT
+        val dx = (b[1] - a[1]) * k
+        val dy = (b[0] - a[0]) * METERS_PER_DEG_LAT
+        val px = (lon - a[1]) * k
+        val py = (lat - a[0]) * METERS_PER_DEG_LAT
+        val len = hypot(dx, dy)
+        if (len == 0.0) return 0.0
+        // Produit vectoriel : > 0 quand le point est à gauche (repère est/nord)
+        return -(dx * py - dy * px) / len
+    }
+
+    /** Cap du début d'une ligne (premier tronçon d'au moins 25 m), ou null si elle est trop courte. */
+    fun lineHeading(points: List<DoubleArray>): Double? {
+        val a = points.firstOrNull() ?: return null
+        val b = points.drop(1).firstOrNull { distance(a[0], a[1], it[0], it[1]) >= 25 } ?: points.lastOrNull() ?: return null
+        if (distance(a[0], a[1], b[0], b[1]) < 5) return null
+        return bearing(a[0], a[1], b[0], b[1])
+    }
+
     fun formatDistance(m: Double): String = when {
         m < 100 -> "${(m / 5).roundToInt() * 5} m"
         m < 1000 -> "${(m / 10).roundToInt() * 10} m"
@@ -314,8 +338,18 @@ class Route(
     private fun cell(lat: Double, lon: Double): Long =
         Math.floor(lat / GRID).toLong() * 1_000_000L + Math.floor(lon / GRID).toLong()
 
-    /** Position sur l'itinéraire d'un point situé à moins de ~maxDist mètres, sinon null. */
-    fun projectNear(lat: Double, lon: Double, maxDist: Double): Projection? {
+    /** Cap du segment i de l'itinéraire. */
+    fun bearingAt(i: Int): Double {
+        val j = i.coerceIn(0, points.size - 2)
+        return Geo.bearing(points[j][0], points[j][1], points[j + 1][0], points[j + 1][1])
+    }
+
+    /**
+     * Position sur l'itinéraire d'un point situé à moins de ~maxDist mètres, sinon null.
+     * accept(segment, écart latéral signé) permet d'écarter les segments qui ne conviennent pas
+     * (alerte de l'autre sens de circulation).
+     */
+    fun projectNear(lat: Double, lon: Double, maxDist: Double, accept: ((Int, Double) -> Boolean)? = null): Projection? {
         if (points.size < 2) return null
         val cy = Math.floor(lat / GRID).toLong()
         val cx = Math.floor(lon / GRID).toLong()
@@ -324,7 +358,8 @@ class Route(
             val segs = grid[(cy + dy) * 1_000_000L + (cx + dx)] ?: continue
             for (i in segs) {
                 val (t, d) = Geo.projectOnSegment(lat, lon, points[i], points[i + 1])
-                if (d <= maxDist && (best == null || d < best.offRoute)) {
+                if (d <= maxDist && (best == null || d < best.offRoute) &&
+                    (accept == null || accept(i, Geo.sideOffset(lat, lon, points[i], points[i + 1])))) {
                     best = Projection(i, cumulative[i] + t * (cumulative[i + 1] - cumulative[i]), d)
                 }
             }

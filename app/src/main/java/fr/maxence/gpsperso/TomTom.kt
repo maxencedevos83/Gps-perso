@@ -63,6 +63,10 @@ object TomTom {
                     detail = detail,
                     source = "tomtom",
                     description = fullDescription,
+                    // Les lignes TomTom suivent le sens de circulation touché
+                    heading = if (geometry.optString("type") == "LineString") Geo.lineHeading(
+                        (0 until coords.length()).mapNotNull { k -> coords.optJSONArray(k)?.let { c -> doubleArrayOf(c.getDouble(1), c.getDouble(0)) } }
+                    ) else null,
                 )
             )
         }

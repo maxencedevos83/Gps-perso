@@ -59,6 +59,7 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
     private var alertView: TextView? = null
     private var speedView: TextView? = null
     private var limitView: TextView? = null
+    private var cityView: TextView? = null
     private var width = 0
     private var height = 0
     private var visible = Rect()
@@ -127,6 +128,19 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
             visibility = View.GONE
         }
         root.addView(limitView, FrameLayout.LayoutParams(dp(56), dp(56)))
+        cityView = TextView(ctx).apply {
+            textSize = 16f
+            maxLines = 1
+            setTextColor(Color.parseColor("#202124"))
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(dp(14), dp(5), dp(14), dp(5))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(14).toFloat()
+                setColor(Color.WHITE)
+            }
+            visibility = View.GONE
+        }
+        root.addView(cityView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         layoutOverlays()
 
         pres.setContentView(root)
@@ -156,6 +170,7 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
         Nav.addListener(this)
         Nav.lastLocation?.let { updateSpeed(it) }
         onSpeedLimit(Nav.speedLimit)
+        onCity(Nav.city)
         Nav.currentAlert?.let { onAlert(it.first, it.second) }
     }
 
@@ -294,6 +309,14 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
         }
     }
 
+    override fun onCity(name: String?) {
+        val v = cityView ?: return
+        if (name == null) v.visibility = View.GONE else {
+            v.text = "📍 $name"
+            v.visibility = View.VISIBLE
+        }
+    }
+
     /** Pastilles d'alerte et de vitesse dans la zone laissée libre par Android Auto. */
     private fun layoutOverlays() {
         val margin = dp(12)
@@ -312,6 +335,13 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
             leftMargin = visible.left + margin + dp(4)
             topMargin = (visible.bottom - margin - dp(64) - dp(64)).coerceAtLeast(0)
         }
+        // Ville : en bas au centre de la zone libre (le haut est pris par l'alerte)
+        cityView?.layoutParams = (cityView?.layoutParams as? FrameLayout.LayoutParams)?.apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            leftMargin = (visible.left - (width - visible.right)) / 2
+            topMargin = (visible.bottom - margin - dp(34)).coerceAtLeast(0)
+        }
+        cityView?.requestLayout()
         limitView?.requestLayout()
         alertView?.requestLayout()
         speedView?.requestLayout()

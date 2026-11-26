@@ -19,6 +19,12 @@ object BisonFute {
         var subType: String = "",
         var lat: Double = Double.NaN,
         var lon: Double = Double.NaN,
+        /** Extrémités amont (from) et aval (to) d'un tronçon TPEG : donnent le sens touché. */
+        var fromLat: Double = Double.NaN,
+        var fromLon: Double = Double.NaN,
+        var toLat: Double = Double.NaN,
+        var toLon: Double = Double.NaN,
+        var direction: String? = null,
         var description: String? = null,
         var road: String? = null,
         var town: String? = null,
@@ -74,8 +80,19 @@ object BisonFute {
                     val text = parser.text?.trim().orEmpty()
                     if (text.isEmpty() || path.isEmpty()) continue
                     when (path.last()) {
-                        "latitude" -> if (r.lat.isNaN()) r.lat = text.toDoubleOrNull() ?: Double.NaN
-                        "longitude" -> if (r.lon.isNaN()) r.lon = text.toDoubleOrNull() ?: Double.NaN
+                        "latitude" -> {
+                            val v = text.toDoubleOrNull() ?: Double.NaN
+                            if (r.lat.isNaN()) r.lat = v
+                            if ("from" in path && r.fromLat.isNaN()) r.fromLat = v
+                            if ("to" in path && r.toLat.isNaN()) r.toLat = v
+                        }
+                        "longitude" -> {
+                            val v = text.toDoubleOrNull() ?: Double.NaN
+                            if (r.lon.isNaN()) r.lon = v
+                            if ("from" in path && r.fromLon.isNaN()) r.fromLon = v
+                            if ("to" in path && r.toLon.isNaN()) r.toLon = v
+                        }
+                        "tpegDirection" -> if (r.direction == null) r.direction = text
                         "value" -> lastValue = text
                         "commentType" -> commentType = text
                         "tpegOtherPointDescriptorType" -> lastDescriptor = text
@@ -168,6 +185,27 @@ object BisonFute {
             detail = null,
             source = "bisonfute",
             description = desc,
+            heading = heading(r),
         )
+    }
+
+    /** Sens de circulation touché : du point amont vers le point aval, sinon direction TPEG. */
+    private fun heading(r: Rec): Double? {
+        if (r.direction in setOf("bothWays", "allDirections")) return null
+        if (!r.fromLat.isNaN() && !r.fromLon.isNaN() && !r.toLat.isNaN() && !r.toLon.isNaN() &&
+            Geo.distance(r.fromLat, r.fromLon, r.toLat, r.toLon) >= 50) {
+            return Geo.bearing(r.fromLat, r.fromLon, r.toLat, r.toLon)
+        }
+        return when (r.direction) {
+            "northBound" -> 0.0
+            "northEastBound" -> 45.0
+            "eastBound" -> 90.0
+            "southEastBound" -> 135.0
+            "southBound" -> 180.0
+            "southWestBound" -> 225.0
+            "westBound" -> 270.0
+            "northWestBound" -> 315.0
+            else -> null
+        }
     }
 }
