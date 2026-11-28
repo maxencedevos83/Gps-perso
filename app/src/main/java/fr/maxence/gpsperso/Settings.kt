@@ -29,6 +29,14 @@ class Settings(context: Context) {
             else -> 0.0
         }
 
+    /**
+     * Taille des bandeaux du haut pendant le guidage : "grand" (schéma d'échangeur et grand bandeau radar),
+     * "compact" (par défaut : une seule bande, radar en pastille) ou "mini" (une ligne).
+     */
+    var bannerSize: String
+        get() = prefs.getString("banner_size", "compact") ?: "compact"
+        set(v) = prefs.edit().putString("banner_size", v).apply()
+
     /** Zones de danger : "toutes", "exces" (seulement si je dépasse la limite) ou "jamais". */
     var dangerMode: String
         get() = prefs.getString("danger_mode", "exces") ?: "exces"

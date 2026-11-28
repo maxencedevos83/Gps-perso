@@ -120,6 +120,7 @@
                 android:visibility="gone" />
 
             <LinearLayout
+                android:id="@+id/maneuverBody"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
@@ -389,6 +390,58 @@
                 android:textColor="#5F6368"
                 android:textSize="12sp"
                 android:visibility="gone" />
+
+            <!-- Radar en approche, en pastille à côté du compteur (bandeaux compacts) -->
+            <LinearLayout
+                android:id="@+id/radarPill"
+                android:layout_width="wrap_content"
+                android:layout_height="56dp"
+                android:layout_gravity="bottom|start"
+                android:layout_marginStart="72dp"
+                android:layout_marginBottom="4dp"
+                android:background="@drawable/bg_pill"
+                android:elevation="6dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="6dp"
+                android:paddingEnd="16dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/radarPillLimit"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:background="@drawable/bg_limit"
+                    android:gravity="center"
+                    android:text="📷"
+                    android:textColor="#202124"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/radarPillTitle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:maxLines="1"
+                        android:textColor="#FFFFFF"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/radarPillDistance"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="#FFFFFF"
+                        android:textSize="22sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+            </LinearLayout>
 
             <!-- Panneau de limitation de vitesse de la route actuelle (OpenStreetMap) -->
             <TextView

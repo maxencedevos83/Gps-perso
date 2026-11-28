@@ -35,8 +35,15 @@ object Geo {
         return (maxOf(base, near) + bias).coerceIn(14.5, 19.5)
     }
 
-    /** Vue moins inclinée tout près de l'intersection : les rues autour de la voiture se lisent mieux. */
-    fun autoTilt(maneuverDistance: Double): Double = if (maneuverDistance < 300) 35.0 else 50.0
+    /**
+     * Vue moins inclinée près de l'intersection, puis carte à plat (vue de dessus) dans les 150 derniers
+     * mètres : on voit exactement quelle branche prendre, avec la flèche dessinée sur la carte.
+     */
+    fun autoTilt(maneuverDistance: Double): Double = when {
+        maneuverDistance < 150 -> 0.0
+        maneuverDistance < 300 -> 35.0
+        else -> 50.0
+    }
 
     private const val EARTH_RADIUS = 6_371_000.0
     private const val METERS_PER_DEG_LAT = 111_320.0

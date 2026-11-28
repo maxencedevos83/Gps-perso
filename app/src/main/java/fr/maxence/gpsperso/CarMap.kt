@@ -242,6 +242,7 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
     }
 
     private var autoZoom = 0.0
+    private var autoTilt = 45.0
     private var autoZoomAt = 0L
 
     /** Zoom automatique pendant le guidage (vitesse et prochaine sortie). */
@@ -250,7 +251,14 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
         if (!following || !locationReady || !Nav.navigating) return
         val now = System.currentTimeMillis()
         if (now - autoZoomAt < 3000) return
-        val target = Geo.autoZoom(if (loc.hasSpeed()) loc.speed else 0f, Nav.lastProgress?.maneuverDistance ?: Double.MAX_VALUE, Nav.settings.guidanceZoomBias)
+        val dist = Nav.lastProgress?.maneuverDistance ?: Double.MAX_VALUE
+        // Vue de dessus dans les derniers mètres avant l'intersection
+        val tilt = Geo.autoTilt(dist).coerceAtMost(45.0)
+        if (tilt != autoTilt) {
+            autoTilt = tilt
+            m.locationComponent.tiltWhileTracking(tilt, 1200)
+        }
+        val target = Geo.autoZoom(if (loc.hasSpeed()) loc.speed else 0f, dist, Nav.settings.guidanceZoomBias)
         if (Math.abs(target - autoZoom) < 0.3) return
         autoZoomAt = now
         autoZoom = target
@@ -272,7 +280,14 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
         applyCamera(animate = true)
     }
 
-    override fun onNavigationStopped() = applyCamera(animate = true)
+    override fun onNavigationStopped() {
+        ManeuverArrow.update(style, null, null)
+        applyCamera(animate = true)
+    }
+
+    override fun onProgress(p: Nav.Progress) {
+        ManeuverArrow.update(style, Nav.route, p)
+    }
 
     override fun onAlertsChanged() = drawAlerts()
 
@@ -365,6 +380,8 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
                 PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
             )
         )
+        // Flèche de la prochaine manœuvre dessinée sur le trajet (comme sur le téléphone)
+        ManeuverArrow.addLayers(s, density, 1.2f)
         s.addSource(GeoJsonSource("dest-src"))
         s.addLayer(
             CircleLayer("dest-layer", "dest-src").withProperties(
@@ -391,6 +408,7 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
         val r = Nav.route
         val empty = FeatureCollection.fromFeatures(emptyList<Feature>())
         val routeSrc = s.getSourceAs<GeoJsonSource>("route-src")
+        if (r == null || r.points.size < 2 || !Nav.navigating) ManeuverArrow.update(s, null, null)
         if (r == null || r.points.size < 2) routeSrc?.setGeoJson(empty)
         else routeSrc?.setGeoJson(Feature.fromGeometry(LineString.fromLngLats(r.points.map { Point.fromLngLat(it[1], it[0]) })))
         val d = Nav.destination
@@ -470,7 +488,8 @@ class CarMap(private val carContext: CarContext) : SurfaceCallback, Nav.Listener
         val speed = Nav.lastLocation?.takeIf { it.hasSpeed() }?.speed ?: 0f
         autoZoom = Geo.autoZoom(speed, Nav.lastProgress?.maneuverDistance ?: Double.MAX_VALUE, Nav.settings.guidanceZoomBias)
         lc.zoomWhileTracking(if (nav) autoZoom else 15.0, duration)
-        lc.tiltWhileTracking(if (nav) 45.0 else 0.0, duration)
+        autoTilt = if (nav) 45.0 else 0.0
+        lc.tiltWhileTracking(autoTilt, duration)
     }
 
     /** Aperçu du trajet complet avant le départ. */

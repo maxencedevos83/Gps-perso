@@ -148,6 +148,7 @@ class MainActivity : Activity(), Nav.Listener {
         recentStore = Nav.recentStore
         lufopStore = Nav.lufopStore
         bindViews()
+        applyBannerSize()
         setupEdgeToEdge()
         updateTrafficButton()
 
@@ -239,6 +240,24 @@ class MainActivity : Activity(), Nav.Listener {
     // ---------- Affichage plein écran : on décale l'interface sous les barres Android ----------
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    /** Taille des textes du bandeau de manœuvre selon le réglage Grand / Compact / Mini. */
+    private fun applyBannerSize() {
+        val size = settings.bannerSize
+        val (arrow, distance, text) = when (size) {
+            "grand" -> Triple(44f, 38f, 18f)
+            "mini" -> Triple(28f, 24f, 15f)
+            else -> Triple(36f, 30f, 16f)
+        }
+        maneuverArrow.textSize = arrow
+        maneuverDistance.textSize = distance
+        maneuverText.textSize = text
+        maneuverText.maxLines = if (size == "mini") 1 else 2
+        maneuverText.ellipsize = android.text.TextUtils.TruncateAt.END
+        val pad = dp(if (size == "grand") 14 else if (size == "mini") 8 else 10)
+        findViewById<View>(R.id.maneuverBody).setPadding(pad, pad, pad, pad)
+        maneuverArrow.layoutParams = maneuverArrow.layoutParams.apply { width = dp(if (size == "grand") 56 else if (size == "mini") 40 else 48) }
+    }
 
     @Suppress("DEPRECATION")
     private fun setupEdgeToEdge() {
@@ -350,6 +369,8 @@ class MainActivity : Activity(), Nav.Listener {
                 PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
             )
         )
+        // Flèche de la prochaine manœuvre, dessinée sur le trajet
+        ManeuverArrow.addLayers(s, resources.displayMetrics.density)
         s.addSource(GeoJsonSource("dest-src"))
         s.addLayer(
             CircleLayer("dest-layer", "dest-src").withProperties(
@@ -464,6 +485,7 @@ class MainActivity : Activity(), Nav.Listener {
     private fun drawRoute(r: Route?) {
         val src = style?.getSourceAs<GeoJsonSource>("route-src") ?: return
         if (r == null || r.points.size < 2) {
+            ManeuverArrow.update(style, null, null)
             src.setGeoJson(FeatureCollection.fromFeatures(emptyList<Feature>()))
             return
         }
@@ -1295,6 +1317,7 @@ class MainActivity : Activity(), Nav.Listener {
     private fun stopNavigation() = Nav.stopNavigation()
 
     override fun onNavigationStopped() {
+        ManeuverArrow.update(style, null, null)
         maneuverBanner.visibility = View.GONE
         findViewById<View>(R.id.maneuverThen).visibility = View.GONE
         hideRadarPanel()
@@ -1333,7 +1356,9 @@ class MainActivity : Activity(), Nav.Listener {
             sign.visibility = if (badge.isNullOrBlank()) View.GONE else View.VISIBLE
             // Vue de l'échangeur à l'approche d'une sortie, d'une bifurcation ou d'un rond-point
             val junction = findViewById<JunctionView>(R.id.junctionView)
-            val junctionRange = if (man.isJunction) 2000.0 else if (man.kind == Maneuver.Kind.ROUNDABOUT) 400.0 else 0.0
+            val size = settings.bannerSize
+            // En compact et mini, pas de schéma en haut : la flèche dessinée sur la carte le remplace
+            val junctionRange = if (size != "grand") 0.0 else if (man.isJunction) 2000.0 else if (man.kind == Maneuver.Kind.ROUNDABOUT) 400.0 else 0.0
             if (dist <= junctionRange) {
                 junction.maneuver = man
                 junction.visibility = View.VISIBLE
@@ -1341,13 +1366,14 @@ class MainActivity : Activity(), Nav.Listener {
             // Barre qui se vide à l'approche
             val bar = findViewById<ShrinkBar>(R.id.maneuverBar)
             val barRange = if (man.isJunction) 2000.0 else 800.0
-            if (dist <= barRange) {
+            if (dist <= barRange && size != "mini") {
                 bar.fraction = (dist / barRange).toFloat()
                 bar.visibility = View.VISIBLE
             } else bar.visibility = View.GONE
             showLanes(man, dist, color)
             showThen(man, p.nextManeuver)
         }
+        ManeuverArrow.update(style, route, p)
         val arrival = SimpleDateFormat("HH:mm", Locale.FRANCE).format(Date(p.arrivalMillis))
         navEta.text = "$arrival · ${Geo.formatDuration(p.remainingTime)}"
         val traffic = if (p.trafficDelay >= 60) " · bouchons +${Geo.formatDuration(p.trafficDelay)}" else ""
@@ -1358,7 +1384,7 @@ class MainActivity : Activity(), Nav.Listener {
     private fun showLanes(man: Maneuver, distance: Double, color: Int) {
         val v = findViewById<LanesView>(R.id.maneuverLanes)
         val lanes = man.lanes
-        if (lanes.isNullOrEmpty() || distance > 2000) { v.visibility = View.GONE; return }
+        if (lanes.isNullOrEmpty() || distance > 2000 || settings.bannerSize == "mini") { v.visibility = View.GONE; return }
         v.accent = color
         v.setLanes(lanes, man.arrow)
         v.visibility = View.VISIBLE
@@ -1368,7 +1394,7 @@ class MainActivity : Activity(), Nav.Listener {
     private fun showThen(man: Maneuver, next: Maneuver?) {
         val v = findViewById<TextView>(R.id.maneuverThen)
         val r = route
-        if (next == null || r == null) { v.visibility = View.GONE; return }
+        if (next == null || r == null || settings.bannerSize == "mini") { v.visibility = View.GONE; return }
         val gap = r.cumulative.getOrNull(next.beginIndex)?.minus(r.cumulative.getOrNull(man.beginIndex) ?: 0.0) ?: Double.MAX_VALUE
         if (gap > 1000) { v.visibility = View.GONE; return }
         val what = when {
@@ -1402,6 +1428,8 @@ class MainActivity : Activity(), Nav.Listener {
     /** Distance à laquelle le grand bandeau radar commence (la barre part pleine de là). */
     private var radarStartDistance = 0.0
     private var radarShownId: String? = null
+    /** Bandeaux compacts : la pastille radar a été touchée pour afficher le grand bandeau. */
+    private var radarExpanded = false
 
     /**
      * Radar fixe en approche : grand bandeau comme pour une sortie, avec la vitesse.
@@ -1411,6 +1439,7 @@ class MainActivity : Activity(), Nav.Listener {
         val panel = findViewById<View>(R.id.radarPanel)
         if (radarShownId != alert.id) {
             radarShownId = alert.id
+            radarExpanded = false
             radarStartDistance = maxOf(distance, 200.0)
         }
         val limit = alert.detail?.let { Regex("\\d{2,3}").find(it)?.value?.toIntOrNull() } ?: Nav.speedLimit
@@ -1418,6 +1447,37 @@ class MainActivity : Activity(), Nav.Listener {
         val over = limit != null && speed != null && speed > limit + 2
         val dangerZone = alert.description?.contains("zone de danger", ignoreCase = true) == true
         val color = Color.parseColor(if (over) "#B91C1C" else "#C2410C")
+        findViewById<View>(R.id.speedFrame).visibility = if (over) View.VISIBLE else View.GONE
+        val what = when {
+            dangerZone -> "Zone de danger"
+            alert.type == AlertType.RADAR_FEU -> "Radar feu rouge"
+            else -> "Radar fixe"
+        }
+        // Bandeaux compacts : simple pastille à côté du compteur, le grand bandeau seulement si on la touche
+        val pill = findViewById<View>(R.id.radarPill)
+        if (settings.bannerSize != "grand" && !radarExpanded) {
+            panel.visibility = View.GONE
+            pill.background.mutate().setTint(color)
+            findViewById<TextView>(R.id.radarPillLimit).apply {
+                text = limit?.toString() ?: if (dangerZone) "⚠" else "📷"
+                textSize = if (limit != null && limit >= 100) 14f else 16f
+            }
+            findViewById<TextView>(R.id.radarPillTitle).text = what
+            findViewById<TextView>(R.id.radarPillDistance).text = Geo.formatDistance(distance.coerceAtLeast(0.0))
+            pill.setOnClickListener {
+                radarExpanded = true
+                showRadarPanel(alert, distance)
+            }
+            pill.visibility = View.VISIBLE
+            return
+        }
+        pill.visibility = View.GONE
+        panel.setOnClickListener {
+            if (settings.bannerSize != "grand") {
+                radarExpanded = false
+                showRadarPanel(alert, distance)
+            }
+        }
         panel.background.mutate().setTint(color)
         panel.clipToOutline = true
         findViewById<RadarView>(R.id.radarView).apply {
@@ -1425,14 +1485,11 @@ class MainActivity : Activity(), Nav.Listener {
             redLight = alert.type == AlertType.RADAR_FEU
             danger = dangerZone
             // Vue de l'échangeur déjà affichée : bandeau radar compact pour laisser voir la route
-            visibility = if (this@MainActivity.findViewById<View>(R.id.junctionView).visibility == View.VISIBLE) View.GONE else View.VISIBLE
+            // (et toujours compact hors réglage « Grand »)
+            val junctionShown = this@MainActivity.findViewById<View>(R.id.junctionView).visibility == View.VISIBLE
+            visibility = if (junctionShown || settings.bannerSize != "grand") View.GONE else View.VISIBLE
         }
         findViewById<TextView>(R.id.radarDistance).text = Geo.formatDistance(distance.coerceAtLeast(0.0))
-        val what = when {
-            dangerZone -> "Zone de danger"
-            alert.type == AlertType.RADAR_FEU -> "Radar feu rouge"
-            else -> "Radar fixe"
-        }
         findViewById<TextView>(R.id.radarTitle).text = if (limit != null) "$what · limité à $limit" else what
         findViewById<ShrinkBar>(R.id.radarBar).fraction = (distance / radarStartDistance).toFloat()
         findViewById<TextView>(R.id.radarSpeed).text = if (speed != null) "$speed km/h" else "— km/h"
@@ -1450,7 +1507,6 @@ class MainActivity : Activity(), Nav.Listener {
                 verdict.setTextColor(Color.parseColor("#1B7A3E"))
             }
         }
-        findViewById<View>(R.id.speedFrame).visibility = if (over) View.VISIBLE else View.GONE
         findViewById<TextView>(R.id.radarIgnore).apply {
             visibility = if (dangerZone) View.VISIBLE else View.GONE
             setOnClickListener {
@@ -1464,6 +1520,7 @@ class MainActivity : Activity(), Nav.Listener {
     private fun hideRadarPanel() {
         radarShownId = null
         findViewById<View>(R.id.radarPanel).visibility = View.GONE
+        findViewById<View>(R.id.radarPill).visibility = View.GONE
         findViewById<View>(R.id.speedFrame).visibility = View.GONE
     }
 
@@ -2472,7 +2529,8 @@ class MainActivity : Activity(), Nav.Listener {
         Sheet(this).title("❓  Aide et nouveautés", "GPS Perso · version ${BuildConfig.VERSION_NAME}")
             .sectionTitle("Nouveautés")
             .text(
-                "🏙️ Petit bandeau en haut de l'écran avec la ville où tu te trouves (téléphone et Android Auto).\n" +
+                "🧭 Intersections plus lisibles : un seul bandeau fin en haut, le radar en pastille à côté du compteur (touchez-la pour le grand bandeau), la manœuvre dessinée en blanc sur la carte et une vue de dessus dans les 150 derniers mètres. Taille réglable dans Affichage de la carte › Taille des bandeaux (Grand = comme avant).\n" +
+                    "🏙️ Petit bandeau en haut de l'écran avec la ville où tu te trouves (téléphone et Android Auto).\n" +
                     "↔️ Radars et bouchons signalés seulement dans ton sens de circulation, et plus pour ceux de la voie d'en face.\n" +
                     "🎙️ Voix ElevenLabs pour le guidage : collez votre clé dans Réglages › Services connectés, puis choisissez une voix française dans Voix et annonces. Si ElevenLabs ne répond pas, la voix du téléphone prend le relais.\n" +
                     "🔍 Carte plus rapprochée pendant le guidage, zoom sur la voiture à l'approche des intersections, et la route reste visible sous les bandeaux de sortie, de voies et de radar. Réglable dans Affichage de la carte › Zoom pendant le guidage.\n" +
@@ -2659,6 +2717,21 @@ class MainActivity : Activity(), Nav.Listener {
             sheet.item(if (key == settings.guidanceZoom) "✓" else "🔍", label, null, "#E8F0FE") {
                 settings.guidanceZoom = key
                 if (navigating) applyAutoZoom(force = true)
+                sheet.dismiss()
+            }
+        }
+        sheet.sectionTitle("Taille des bandeaux pendant le guidage")
+        listOf(
+            "grand" to ("Grand" to "Schéma de l'échangeur et grand bandeau radar"),
+            "compact" to ("Compact (conseillé)" to "Une seule bande en haut, radar en pastille, flèche sur la carte"),
+            "mini" to ("Mini" to "Une seule ligne, la carte prend presque tout l'écran"),
+        ).forEach { (key, v) ->
+            sheet.item(if (key == settings.bannerSize) "✓" else "▭", v.first, v.second, "#E8F0FE") {
+                settings.bannerSize = key
+                applyBannerSize()
+                radarExpanded = false
+                Nav.lastProgress?.let { onProgress(it) }
+                Nav.currentAlert?.let { onAlert(it.first, it.second) }
                 sheet.dismiss()
             }
         }
